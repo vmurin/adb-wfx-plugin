@@ -99,13 +99,22 @@ Once connected, devices appear as directories under a virtual `ADB` root
 
 **A note on how confident to be in the above:** everything in this list
 is covered by the unit test suite (`./run_tests.sh`, against a fake
-transport — no real device involved). The end-to-end test that exercises
-the same behavior against a real phone, `tests/device_test.sh`, is
-written and complete but **has not yet been run against real hardware**
-(see [Testing](#testing)) — including the mtime-preservation behavior
-that is this project's headline claim. Treat "what works" as
-unit-tested-and-designed-to-work, not yet as hardware-confirmed, until
-`tests/device_test.sh` has been run for real and this note is removed.
+transport — no real device involved), **and** by the end-to-end suite
+`tests/device_test.sh`, which has been run against real hardware: a
+Pixel 7 (`panther`), Android sync protocol v1, phone timezone
+`Europe/Berlin`. All 11 steps passed, including both directions of the
+mtime-preservation behavior that is this project's headline claim.
+
+The phone's non-UTC timezone matters for one of those steps: the
+`touch -t` fallback (step 6b) is only meaningfully tested on a device
+that is *not* set to UTC, because the bug it guards against is an offset
+by exactly the device's UTC offset. On this run that offset was two
+hours and the assertion was exact, so the fallback is confirmed correct
+rather than merely untriggered.
+
+Still unmeasured: throughput. `tests/bench.sh` has not been run, so the
+table above remains the raw-`adb` baseline rather than this plugin's own
+numbers.
 
 ## Known limitations
 
