@@ -245,6 +245,20 @@ std::string encodeStatBody(uint32_t mode, uint32_t size, uint32_t mtime) {
     return s;
 }
 
+// The scripted reply to the "is this actually a directory?" STAT that
+// listDirectory issues before every LIST (PluginCore::checkIsDirectory):
+// a plain directory. adbd answers a failed opendir() with an empty DONE
+// rather than a FAIL, so that STAT is the only thing standing between a
+// typo and a silently blank panel -- which means nearly every listing
+// test needs one queued ahead of its LIST.
+std::string dirStatScript() {
+    return std::string("OKAY" "OKAY") + "STAT" + encodeStatBody(0040755, 4096, 1600000000);
+}
+
+void pushDirStat(QueueFactory* factory) {
+    factory->push(std::make_unique<RecordingTransport>(dirStatScript(), nullptr, nullptr));
+}
+
 // The brief's own example: a space, an apostrophe and Cyrillic, all in one
 // path -- proof the quoting holds end to end.
 const char* const TRICKY_REMOTE_PATH = "/sdcard/DCIM/\xD0\x92\xD0\xB0\xD1\x81\xD1\x8F's photo.jpg";
@@ -329,9 +343,12 @@ TEST(DisplayNamePathSuite, listDirectoryResolvesDisplayNameToSerial) {
 
     std::string script = "OKAY" "OKAY" + encodeDent(0100644, 10, 1600000000, "a.txt") +
                           encodeListDone();
+    std::string statWritten;
     std::string written;
-    auto transport = std::make_unique<RecordingTransport>(script, &written, nullptr);
-    AdbClient client(singleUseFactory(std::move(transport)));
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(dirStatScript(), &statWritten, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(script, &written, nullptr));
+    AdbClient client(factory.asFactory());
     PluginCore core(client);
 
     std::vector<FindResult> entries;
@@ -339,6 +356,13 @@ TEST(DisplayNamePathSuite, listDirectoryResolvesDisplayNameToSerial) {
     std::string error;
     CHECK(core.listDirectory(displayPath, &entries, &warning, &error));
     CHECK(error.empty());
+
+    // Both round trips must address the bare serial, not the display name.
+    std::string expectedStat = encodeHostRequest("host:transport:" + serial) +
+                                encodeHostRequest("sync:") +
+                                syncHeaderBytes("STAT", static_cast<uint32_t>(devicePath.size())) +
+                                devicePath;
+    CHECK_STR_EQ(statWritten, expectedStat);
 
     std::string expectedWritten = encodeHostRequest("host:transport:" + serial) +
                                    encodeHostRequest("sync:") +
@@ -437,6 +461,7 @@ TEST(ListDirectorySuite, mapsDentModesToIsDirAndDropsDotEntries) {
                               encodeStatBody(0100644, 99, 1600000004);
 
     QueueFactory factory;
+    pushDirStat(&factory);
     factory.push(std::make_unique<RecordingTransport>(script, nullptr, nullptr));
     factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
     AdbClient client(factory.asFactory());
@@ -492,6 +517,7 @@ TEST(SymlinkSuite, symlinkToDirectoryIsListedAsADirectory) {
 
     QueueFactory factory;
     std::string statWritten;
+    pushDirStat(&factory);
     factory.push(std::make_unique<RecordingTransport>(listScript, nullptr, nullptr));
     factory.push(std::make_unique<RecordingTransport>(statScript, &statWritten, nullptr));
     AdbClient client(factory.asFactory());
@@ -515,7 +541,7 @@ TEST(SymlinkSuite, symlinkToDirectoryIsListedAsADirectory) {
                                 syncHeaderBytes("STAT", static_cast<uint32_t>(resolvedPath.size())) +
                                 resolvedPath;
     CHECK_STR_EQ(statWritten, expectedStat);
-    CHECK_EQ(factory.callCount(), 2);
+    CHECK_EQ(factory.callCount(), 3); // directory STAT, LIST, symlink STAT
 }
 
 TEST(SymlinkSuite, symlinkToRegularFileStaysAFile) {
@@ -526,6 +552,7 @@ TEST(SymlinkSuite, symlinkToRegularFileStaysAFile) {
                               encodeStatBody(0100644, 4096, 1600000009);
 
     QueueFactory factory;
+    pushDirStat(&factory);
     factory.push(std::make_unique<RecordingTransport>(listScript, nullptr, nullptr));
     factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
     AdbClient client(factory.asFactory());
@@ -549,6 +576,7 @@ TEST(SymlinkSuite, brokenSymlinkStaysAFileAndDoesNotFailTheListing) {
     std::string statScript = std::string("OKAY" "OKAY") + "STAT" + encodeStatBody(0, 0, 0);
 
     QueueFactory factory;
+    pushDirStat(&factory);
     factory.push(std::make_unique<RecordingTransport>(listScript, nullptr, nullptr));
     factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
     AdbClient client(factory.asFactory());
@@ -572,6 +600,7 @@ TEST(SymlinkSuite, resolutionIsCachedWithTheListingAndNotRepeated) {
                               encodeStatBody(0040771, 4096, 1600000009);
 
     QueueFactory factory;
+    pushDirStat(&factory);
     factory.push(std::make_unique<RecordingTransport>(listScript, nullptr, nullptr));
     factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
     AdbClient client(factory.asFactory());
@@ -582,10 +611,10 @@ TEST(SymlinkSuite, resolutionIsCachedWithTheListingAndNotRepeated) {
     std::string warning;
     std::string error;
     CHECK(core.listDirectory("/SERIAL1", &first, &warning, &error));
-    CHECK_EQ(factory.callCount(), 2);
+    CHECK_EQ(factory.callCount(), 3);
 
     CHECK(core.listDirectory("/SERIAL1", &second, &warning, &error));
-    CHECK_EQ(factory.callCount(), 2); // served from cache: no second STAT round trip
+    CHECK_EQ(factory.callCount(), 3); // served from cache: no round trip at all
     CHECK_EQ(second.size(), static_cast<size_t>(1));
     CHECK(second[0].isDir);
 }
@@ -679,6 +708,7 @@ TEST(ListDirectorySuite, secondCallHitsCacheAndMakesNoNewTransportCalls) {
                           encodeListDone();
 
     QueueFactory factory;
+    pushDirStat(&factory);
     factory.push(std::make_unique<RecordingTransport>(script, nullptr, nullptr));
     AdbClient client(factory.asFactory());
     PluginCore core(client);
@@ -689,11 +719,11 @@ TEST(ListDirectorySuite, secondCallHitsCacheAndMakesNoNewTransportCalls) {
     std::string error;
 
     CHECK(core.listDirectory("/SERIAL1/sdcard", &entries1, &warning, &error));
-    CHECK_EQ(factory.callCount(), 1);
+    CHECK_EQ(factory.callCount(), 2); // the directory STAT, then the LIST
     CHECK_EQ(entries1.size(), static_cast<size_t>(1));
 
     CHECK(core.listDirectory("/SERIAL1/sdcard", &entries2, &warning, &error));
-    CHECK_EQ(factory.callCount(), 1); // no new transport requested: served from cache
+    CHECK_EQ(factory.callCount(), 2); // no new transport requested: served from cache
     CHECK_EQ(entries2.size(), static_cast<size_t>(1));
     CHECK_STR_EQ(entries2[0].name, "a.txt");
 }
@@ -703,8 +733,10 @@ TEST(ListDirectorySuite, mutatingOperationInvalidatesCachedListing) {
                               encodeListDone();
 
     QueueFactory factory;
+    pushDirStat(&factory);
     factory.push(std::make_unique<RecordingTransport>(listScript, nullptr, nullptr));
     factory.push(std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), nullptr, nullptr));
+    pushDirStat(&factory);
     factory.push(std::make_unique<RecordingTransport>(listScript, nullptr, nullptr));
 
     AdbClient client(factory.asFactory());
@@ -715,14 +747,154 @@ TEST(ListDirectorySuite, mutatingOperationInvalidatesCachedListing) {
     std::string error;
 
     CHECK(core.listDirectory("/SERIAL1/sdcard", &entries, &warning, &error));
-    CHECK_EQ(factory.callCount(), 1);
+    CHECK_EQ(factory.callCount(), 2);
 
     CHECK(core.deleteFile("/SERIAL1/sdcard/a.txt", &error));
-    CHECK_EQ(factory.callCount(), 2);
+    CHECK_EQ(factory.callCount(), 3);
 
     entries.clear();
     CHECK(core.listDirectory("/SERIAL1/sdcard", &entries, &warning, &error));
-    CHECK_EQ(factory.callCount(), 3); // cache was invalidated: this made a fresh network call
+    CHECK_EQ(factory.callCount(), 5); // cache was invalidated: fresh STAT + LIST
+}
+
+// ---------------------------------------------------------------------
+// A directory that isn't one, or isn't there.
+//
+// adbd's do_list sends DONE with zero DENTs when opendir() fails -- never
+// FAIL -- so /data, a plain file, and a typo all used to come back as
+// successful empty listings, get cached as empty, and leave Double
+// Commander showing a blank panel with no message at all.
+// ---------------------------------------------------------------------
+
+TEST(ListDirectorySuite, aPathThatDoesNotExistIsAnErrorNotAnEmptyListing) {
+    // All-zero STAT body: the sync protocol's "does not exist".
+    std::string statScript = std::string("OKAY" "OKAY") + "STAT" + encodeStatBody(0, 0, 0);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::vector<FindResult> entries;
+    std::string warning;
+    std::string error;
+    CHECK(!core.listDirectory("/SERIAL1/sdcard/typo", &entries, &warning, &error));
+    CHECK(error.find("no such file or directory") != std::string::npos);
+    CHECK(error.find("/sdcard/typo") != std::string::npos);
+    // No LIST was even attempted.
+    CHECK_EQ(factory.callCount(), 1);
+}
+
+TEST(ListDirectorySuite, aRegularFileIsReportedAsNotADirectory) {
+    std::string statScript =
+        std::string("OKAY" "OKAY") + "STAT" + encodeStatBody(0100644, 1234, 1600000000);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::vector<FindResult> entries;
+    std::string warning;
+    std::string error;
+    CHECK(!core.listDirectory("/SERIAL1/sdcard/a.jpg", &entries, &warning, &error));
+    CHECK(error.find("not a directory") != std::string::npos);
+    CHECK_EQ(factory.callCount(), 1);
+}
+
+TEST(ListDirectorySuite, aGenuinelyEmptyDirectoryStillListsSuccessfully) {
+    QueueFactory factory;
+    pushDirStat(&factory);
+    factory.push(std::make_unique<RecordingTransport>(
+        std::string("OKAY" "OKAY") + encodeListDone(), nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::vector<FindResult> entries;
+    std::string warning;
+    std::string error;
+    CHECK(core.listDirectory("/SERIAL1/sdcard/empty", &entries, &warning, &error));
+    CHECK(error.empty());
+    CHECK_EQ(entries.size(), static_cast<size_t>(0));
+}
+
+TEST(ListDirectorySuite, aSymlinkedDirectoryCanStillBeOpened) {
+    // /sdcard itself: the guard must resolve the link before judging it,
+    // or the single most common destination on the phone stops opening.
+    std::string linkStat =
+        std::string("OKAY" "OKAY") + "STAT" + encodeStatBody(0120777, 21, 1600000000);
+    std::string targetStat =
+        std::string("OKAY" "OKAY") + "STAT" + encodeStatBody(0040771, 4096, 1600000001);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(linkStat, nullptr, nullptr));
+    std::string targetStatWritten;
+    factory.push(std::make_unique<RecordingTransport>(targetStat, &targetStatWritten, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(
+        std::string("OKAY" "OKAY") + encodeDent(0100644, 10, 1600000002, "a.txt") +
+            encodeListDone(),
+        nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::vector<FindResult> entries;
+    std::string warning;
+    std::string error;
+    CHECK(core.listDirectory("/SERIAL1/sdcard", &entries, &warning, &error));
+    CHECK(error.empty());
+    CHECK_EQ(entries.size(), static_cast<size_t>(1));
+
+    std::string resolved = "/sdcard/.";
+    std::string expectedStat = encodeHostRequest("host:transport:SERIAL1") +
+                                encodeHostRequest("sync:") +
+                                syncHeaderBytes("STAT", static_cast<uint32_t>(resolved.size())) +
+                                resolved;
+    CHECK_STR_EQ(targetStatWritten, expectedStat);
+}
+
+// ---------------------------------------------------------------------
+// Cache expiry, through PluginCore.
+//
+// Only this plugin's own mutations invalidated a cached listing, so a
+// photo taken on the phone, or a change made through the other panel,
+// never appeared -- Ctrl+R re-served the same stale vector. The clock is
+// injected so this proves expiry without sleeping.
+// ---------------------------------------------------------------------
+
+TEST(ListDirectorySuite, aCachedListingIsRefetchedOnceItsTtlHasElapsed) {
+    std::string listScript = "OKAY" "OKAY" + encodeDent(0100644, 10, 1600000000, "a.txt") +
+                              encodeListDone();
+    std::string refreshedScript = "OKAY" "OKAY" + encodeDent(0100644, 10, 1600000000, "a.txt") +
+                                   encodeDent(0100644, 20, 1600000005, "b.txt") + encodeListDone();
+
+    QueueFactory factory;
+    pushDirStat(&factory);
+    factory.push(std::make_unique<RecordingTransport>(listScript, nullptr, nullptr));
+    pushDirStat(&factory);
+    factory.push(std::make_unique<RecordingTransport>(refreshedScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+
+    int64_t now = 1000;
+    PluginCore core(client, [&now]() { return now; }, /*cacheTtlSeconds=*/5);
+
+    std::vector<FindResult> entries;
+    std::string warning;
+    std::string error;
+    CHECK(core.listDirectory("/SERIAL1/sdcard", &entries, &warning, &error));
+    CHECK_EQ(factory.callCount(), 2);
+
+    now = 1004; // still inside the TTL: served from cache, no round trip
+    entries.clear();
+    CHECK(core.listDirectory("/SERIAL1/sdcard", &entries, &warning, &error));
+    CHECK_EQ(factory.callCount(), 2);
+    CHECK_EQ(entries.size(), static_cast<size_t>(1));
+
+    now = 1006; // expired: the file added on the phone must now show up
+    entries.clear();
+    CHECK(core.listDirectory("/SERIAL1/sdcard", &entries, &warning, &error));
+    CHECK_EQ(factory.callCount(), 4);
+    CHECK_EQ(entries.size(), static_cast<size_t>(2));
+    CHECK_STR_EQ(entries[1].name, "b.txt");
 }
 
 // ---------------------------------------------------------------------
@@ -959,6 +1131,7 @@ TEST(PutFileSuite, cancelledUploadInvalidatesCache) {
     writeFile(localPath, "some bytes to upload");
 
     QueueFactory factory;
+    pushDirStat(&factory);
     factory.push(std::make_unique<RecordingTransport>(listScript, nullptr, nullptr));
     // A cancelled syncSend never reads a final reply (see
     // AdbClientSuite.syncSendCancellationStopsMidFileWithoutReportingSuccess
@@ -971,20 +1144,21 @@ TEST(PutFileSuite, cancelledUploadInvalidatesCache) {
     std::string warning;
     std::string error;
     CHECK(core.listDirectory("/SERIAL1/sdcard", &entries, &warning, &error));
-    CHECK_EQ(factory.callCount(), 1);
+    CHECK_EQ(factory.callCount(), 2);
 
     ProgressFn progress = [](uint64_t, uint64_t) { return false; }; // cancel immediately
     int result = core.putFile(localPath, "/SERIAL1/sdcard/cancel_upload.bin",
                                FS_COPYFLAGS_OVERWRITE, progress, &error);
     CHECK_EQ(result, FS_FILE_USERABORT);
-    CHECK_EQ(factory.callCount(), 2);
+    CHECK_EQ(factory.callCount(), 3);
 
     // A cancelled send may already have written a partial file remotely --
     // the cache must not still be serving the pre-upload listing.
+    pushDirStat(&factory);
     factory.push(std::make_unique<RecordingTransport>(listScript, nullptr, nullptr));
     entries.clear();
     CHECK(core.listDirectory("/SERIAL1/sdcard", &entries, &warning, &error));
-    CHECK_EQ(factory.callCount(), 3);
+    CHECK_EQ(factory.callCount(), 5);
 }
 
 // ---------------------------------------------------------------------

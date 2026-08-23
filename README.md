@@ -121,10 +121,24 @@ unit-tested-and-designed-to-work, not yet as hardware-confirmed, until
   plugin, not a device-management tool.
 - **Global, unsynchronized state.** The plugin keeps one `AdbClient`, one
   directory-listing cache, and one `PluginCore` instance for its entire
-  lifetime, with no locking. Double Commander's background/multi-threaded
-  transfer modes call into a WFX plugin from more than one thread at
-  once, and this plugin does not make that safe — only its normal,
-  single-threaded copy/move/browse operations are supported.
+  lifetime. Double Commander's background/multi-threaded transfer modes
+  call into a WFX plugin from more than one thread at once, and this
+  plugin does not make that safe — only its normal, single-threaded
+  copy/move/browse operations are supported. The listing cache itself is
+  mutex-guarded (racing a `std::map` would corrupt it and take Double
+  Commander down with it), but that protects one container; it does not
+  make the plugin as a whole thread-safe.
+- **Directory listings can be up to a few seconds stale.** A listing is
+  cached briefly so that stepping back into a directory you just left
+  costs no round trip. A change made on the phone itself, or through
+  Double Commander's other panel, therefore shows up on the next refresh
+  after that window rather than instantly.
+- **Permission-denied directories look empty.** `adbd` answers a listing
+  of a directory it cannot open (`/data`, `/data/data` on an unrooted
+  phone) with a successful, empty result rather than an error, and the
+  sync protocol offers nothing to tell that apart from a directory that
+  really is empty. A path that does not exist, or that is a file rather
+  than a directory, *is* reported properly.
 - **A narrow rename/move race.** Refusing to overwrite an existing target
   (when "overwrite" isn't requested) is implemented as "check whether the
   target exists, then `mv`" — there is a brief window between the check

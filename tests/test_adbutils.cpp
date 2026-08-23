@@ -3,10 +3,13 @@
 // cache. Written before adbutils.hpp exists (TDD) -- see
 // .superpowers/sdd/plan-adb-wfx/task-3-report.md for the RED run.
 #include "adbutils.hpp"
+
 #include "testing.hpp"
 
+#include <atomic>
 #include <cstdio>
 #include <stdexcept>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -212,16 +215,17 @@ TEST(ListingCacheSuite, putGetRoundTrip) {
 
     cache.put("/S/sdcard", entries);
 
-    const std::vector<DirEntry>* got = cache.get("/S/sdcard");
-    CHECK(got != nullptr);
-    CHECK_EQ(got->size(), static_cast<size_t>(2));
-    CHECK_STR_EQ((*got)[0].name, "DCIM");
-    CHECK_STR_EQ((*got)[1].name, "Download");
+    std::vector<DirEntry> got;
+    CHECK(cache.get("/S/sdcard", &got));
+    CHECK_EQ(got.size(), static_cast<size_t>(2));
+    CHECK_STR_EQ(got[0].name, "DCIM");
+    CHECK_STR_EQ(got[1].name, "Download");
 }
 
-TEST(ListingCacheSuite, getOfAbsentKeyReturnsNullptr) {
+TEST(ListingCacheSuite, getOfAbsentKeyReturnsFalse) {
     ListingCache cache;
-    CHECK(cache.get("/nope") == nullptr);
+    std::vector<DirEntry> got;
+    CHECK(!cache.get("/nope", &got));
 }
 
 TEST(ListingCacheSuite, invalidateDropsDirAndChildrenButNotSiblingsOrPrefixCollisions) {
@@ -233,10 +237,11 @@ TEST(ListingCacheSuite, invalidateDropsDirAndChildrenButNotSiblingsOrPrefixColli
 
     cache.invalidate("/S/sdcard");
 
-    CHECK(cache.get("/S/sdcard") == nullptr);
-    CHECK(cache.get("/S/sdcard/DCIM") == nullptr);
-    CHECK(cache.get("/S/sdcardX") != nullptr);
-    CHECK(cache.get("/S/other") != nullptr);
+    std::vector<DirEntry> got;
+    CHECK(!cache.get("/S/sdcard", &got));
+    CHECK(!cache.get("/S/sdcard/DCIM", &got));
+    CHECK(cache.get("/S/sdcardX", &got));
+    CHECK(cache.get("/S/other", &got));
 }
 
 TEST(ListingCacheSuite, clearEmptiesTheCache) {
@@ -248,7 +253,8 @@ TEST(ListingCacheSuite, clearEmptiesTheCache) {
     cache.clear();
 
     CHECK_EQ(cache.size(), static_cast<size_t>(0));
-    CHECK(cache.get("/S/sdcard") == nullptr);
+    std::vector<DirEntry> got;
+    CHECK(!cache.get("/S/sdcard", &got));
 }
 
 TEST(ListingCacheSuite, sizeReflectsNumberOfCachedDirectories) {
@@ -256,4 +262,108 @@ TEST(ListingCacheSuite, sizeReflectsNumberOfCachedDirectories) {
     CHECK_EQ(cache.size(), static_cast<size_t>(0));
     cache.put("/S/sdcard", std::vector<DirEntry>{});
     CHECK_EQ(cache.size(), static_cast<size_t>(1));
+}
+
+// ---------------------------------------------------------------------
+// Cache expiry.
+//
+// Nothing but this plugin's own mutations used to invalidate an entry, so
+// a photo taken on the phone -- or a change made through Double
+// Commander's other panel -- never appeared: Ctrl+R re-served the same
+// stale vector and the plugin looked broken. A short wall-clock TTL fixes
+// that while keeping the "re-entering a directory is instant" benefit.
+// The clock is injected so these tests never sleep.
+// ---------------------------------------------------------------------
+
+TEST(ListingCacheSuite, entryIsStillServedBeforeTheTtlExpires) {
+    int64_t now = 1000;
+    ListingCache cache([&now]() { return now; }, /*ttlSeconds=*/5);
+    cache.put("/S/sdcard", std::vector<DirEntry>(1));
+
+    now = 1004; // one second short of the TTL
+    std::vector<DirEntry> got;
+    CHECK(cache.get("/S/sdcard", &got));
+    CHECK_EQ(got.size(), static_cast<size_t>(1));
+}
+
+TEST(ListingCacheSuite, entryExpiresOnceTheTtlHasElapsed) {
+    int64_t now = 1000;
+    ListingCache cache([&now]() { return now; }, /*ttlSeconds=*/5);
+    cache.put("/S/sdcard", std::vector<DirEntry>(1));
+
+    now = 1005;
+    std::vector<DirEntry> got;
+    CHECK(!cache.get("/S/sdcard", &got));
+    // The expired entry is dropped, not merely hidden.
+    CHECK_EQ(cache.size(), static_cast<size_t>(0));
+}
+
+TEST(ListingCacheSuite, aFreshPutRestartsTheTtl) {
+    int64_t now = 1000;
+    ListingCache cache([&now]() { return now; }, /*ttlSeconds=*/5);
+    cache.put("/S/sdcard", std::vector<DirEntry>(1));
+
+    now = 1004;
+    cache.put("/S/sdcard", std::vector<DirEntry>(2));
+
+    now = 1008; // 8s after the first put, 4s after the second
+    std::vector<DirEntry> got;
+    CHECK(cache.get("/S/sdcard", &got));
+    CHECK_EQ(got.size(), static_cast<size_t>(2));
+}
+
+TEST(ListingCacheSuite, aClockThatGoesBackwardsNeverServesAStaleEntryForever) {
+    // A wall clock can jump backwards (an NTP correction, a user changing
+    // the system time). An entry whose age computes as negative must be
+    // treated as expired rather than as "fresh for the next few hours".
+    int64_t now = 1000;
+    ListingCache cache([&now]() { return now; }, /*ttlSeconds=*/5);
+    cache.put("/S/sdcard", std::vector<DirEntry>(1));
+
+    now = 900;
+    std::vector<DirEntry> got;
+    CHECK(!cache.get("/S/sdcard", &got));
+}
+
+TEST(ListingCacheSuite, concurrentPutGetInvalidateDoNotCorruptTheMap) {
+    // Double Commander runs file operations on a worker thread while the
+    // panel lists on another. Racing put against get/invalidate on a bare
+    // std::map is node corruption, which takes the whole host process
+    // down -- so all four operations are serialised by a mutex inside the
+    // cache. This does not make the plugin as a whole thread-safe; it
+    // makes the one shared container safe to touch from two threads.
+    ListingCache cache;
+    std::atomic<bool> stop{false};
+
+    std::thread writer([&]() {
+        for (int i = 0; i < 2000 && !stop; ++i) {
+            std::vector<DirEntry> entries(1);
+            entries[0].name = "e" + std::to_string(i);
+            cache.put("/S/dir" + std::to_string(i % 16), std::move(entries));
+        }
+    });
+    std::thread reader([&]() {
+        for (int i = 0; i < 2000 && !stop; ++i) {
+            std::vector<DirEntry> got;
+            cache.get("/S/dir" + std::to_string(i % 16), &got);
+            (void)cache.size();
+        }
+    });
+    std::thread invalidator([&]() {
+        for (int i = 0; i < 2000 && !stop; ++i) {
+            cache.invalidate("/S/dir" + std::to_string(i % 16));
+        }
+    });
+
+    writer.join();
+    reader.join();
+    invalidator.join();
+
+    // Reaching here without a crash or a sanitizer trip is the assertion;
+    // the cache must also still be usable afterwards.
+    cache.clear();
+    cache.put("/S/after", std::vector<DirEntry>(1));
+    std::vector<DirEntry> got;
+    CHECK(cache.get("/S/after", &got));
+    CHECK_EQ(got.size(), static_cast<size_t>(1));
 }

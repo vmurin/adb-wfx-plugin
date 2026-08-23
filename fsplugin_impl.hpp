@@ -315,6 +315,11 @@ class PluginCore {
 public:
     explicit PluginCore(AdbClient& client) : client_(client) {}
 
+    // Same, with the listing cache's clock and TTL injected -- for tests
+    // that need to prove expiry without sleeping through it.
+    PluginCore(AdbClient& client, ClockFn clock, int64_t cacheTtlSeconds)
+        : client_(client), cache_(std::move(clock), cacheTtlSeconds) {}
+
     // Returns entries for a WFX directory path. Root ("/") returns one
     // entry per usable device; every other path lists the device's
     // on-device directory via the sync protocol, through the cache.
@@ -333,9 +338,28 @@ public:
             return listRootDevices(out, warning, error);
         }
 
-        if (const std::vector<DirEntry>* cached = cache_.get(wfxDir)) {
-            appendEntries(*cached, out);
+        std::vector<DirEntry> cached;
+        if (cache_.get(wfxDir, &cached)) {
+            appendEntries(cached, out);
             return true;
+        }
+
+        // adbd's do_list answers a failed opendir() with a plain DONE and
+        // zero DENTs -- it never sends FAIL. A path that does not exist,
+        // a path that is actually a file, and a directory that is
+        // genuinely empty are therefore indistinguishable at the LIST
+        // level: all three come back as a successful empty listing, get
+        // cached as empty, and leave Double Commander showing a blank
+        // panel with no explanation for what is usually a typo. STAT
+        // first and name the problem.
+        //
+        // The one case this still cannot separate from "empty" is a
+        // directory that exists but cannot be opened (/data, /data/data
+        // on an unrooted phone): the sync protocol offers nothing to
+        // distinguish it by short of guessing at mode bits and a uid the
+        // client does not know.
+        if (!checkIsDirectory(rp.serial, rp.path, error)) {
+            return false;
         }
 
         std::vector<DirEntry> entries;
@@ -779,6 +803,44 @@ private:
             *warning = warnings;
         }
         return true;
+    }
+
+    // Rejects, with a message that says which, a listing target that does
+    // not exist or is not a directory. A symlink is resolved through
+    // before being judged (see resolveSymlinkTargets): /sdcard is a
+    // symlink on every modern device and must of course still open.
+    bool checkIsDirectory(const std::string& serial, const std::string& path, std::string* error) {
+        DirEntry info;
+        bool exists = false;
+        AdbError err = client_.syncStat(serial, path, &info, &exists);
+        if (!err.ok) {
+            if (error != nullptr) {
+                *error = err.message;
+            }
+            return false;
+        }
+        if (!exists) {
+            if (error != nullptr) {
+                *error = "cannot open " + path + ": no such file or directory";
+            }
+            return false;
+        }
+        if (info.isDir()) {
+            return true;
+        }
+        if (info.isSymlink()) {
+            DirEntry target;
+            bool targetExists = false;
+            AdbError targetErr =
+                client_.syncStat(serial, throughSymlink(path), &target, &targetExists);
+            if (targetErr.ok && targetExists && target.isDir()) {
+                return true;
+            }
+        }
+        if (error != nullptr) {
+            *error = "cannot open " + path + ": not a directory";
+        }
+        return false;
     }
 
     // A path that lstat() resolves through a final symlink: POSIX

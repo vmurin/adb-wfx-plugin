@@ -12,8 +12,13 @@
 #include "adbproto.hpp"
 
 #include <cstddef>
+#include <cstdint>
+#include <ctime>
+#include <functional>
 #include <map>
+#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 struct RemotePath {
@@ -80,23 +85,76 @@ inline std::string shellQuote(const std::string& arg) {
     return out;
 }
 
+// How long a cached listing stays valid. Nothing but this plugin's own
+// mutations invalidates an entry, so without an expiry a photo taken on
+// the phone -- or a change made through Double Commander's other panel --
+// would never appear: Ctrl+R would re-serve the same stale vector and the
+// plugin would look broken. A few seconds is long enough to keep the real
+// benefit (re-entering a directory you just left costs no round trip)
+// and short enough that "refresh" means what the user thinks it means.
+constexpr int64_t LISTING_CACHE_TTL_SECONDS = 5;
+
+// Wall-clock source, in seconds since the Unix epoch. Injected so the
+// expiry logic can be tested without sleeping.
+using ClockFn = std::function<int64_t()>;
+
+inline int64_t systemClockSeconds() {
+    return static_cast<int64_t>(::time(nullptr));
+}
+
 // Caches directory listings keyed by WFX directory path, so repeated
 // browsing of the same directory doesn't re-issue a sync LIST round trip.
+// Entries expire after ttlSeconds.
+//
+// Every operation is serialised by a mutex. Double Commander calls a WFX
+// plugin's file operations from a worker thread while the panel lists
+// from another, and there is exactly one PluginCore holding exactly one
+// of these -- racing put against get or invalidate on a bare std::map is
+// node corruption, which takes the host process down rather than merely
+// misbehaving. get() hands back a COPY for the same reason: a pointer
+// into the map would outlive the lock that made it safe to obtain.
+//
+// This makes the shared container safe to touch from two threads. It does
+// NOT make the plugin as a whole thread-safe -- see README's limitations
+// note and fsplugin.cpp's file comment.
 class ListingCache {
 public:
+    ListingCache() : clock_(&systemClockSeconds), ttlSeconds_(LISTING_CACHE_TTL_SECONDS) {}
+
+    ListingCache(ClockFn clock, int64_t ttlSeconds)
+        : clock_(std::move(clock)), ttlSeconds_(ttlSeconds) {}
+
     void put(const std::string& wfxDir, std::vector<DirEntry> entries) {
-        entries_[wfxDir] = std::move(entries);
+        std::lock_guard<std::mutex> lock(mutex_);
+        entries_[wfxDir] = Entry{std::move(entries), clock_()};
     }
 
-    const std::vector<DirEntry>* get(const std::string& wfxDir) const {
+    // Copies the cached listing for wfxDir into *out and returns true, or
+    // returns false (leaving *out alone) when there is no live entry.
+    bool get(const std::string& wfxDir, std::vector<DirEntry>* out) {
+        std::lock_guard<std::mutex> lock(mutex_);
         auto it = entries_.find(wfxDir);
-        return (it != entries_.end()) ? &it->second : nullptr;
+        if (it == entries_.end()) {
+            return false;
+        }
+        // A wall clock can jump backwards (an NTP correction, a user
+        // changing the system time), which would otherwise make an entry
+        // look fresh for however far back it jumped. Any age outside
+        // [0, ttl) counts as expired.
+        int64_t age = clock_() - it->second.storedAt;
+        if (age < 0 || age >= ttlSeconds_) {
+            entries_.erase(it);
+            return false;
+        }
+        *out = it->second.entries;
+        return true;
     }
 
     // Drops wfxDir and everything beneath it. A real prefix-on-path-
     // boundary check: "/S/sdcard" invalidates "/S/sdcard" and
     // "/S/sdcard/DCIM" but leaves "/S/sdcardX" alone.
     void invalidate(const std::string& wfxDir) {
+        std::lock_guard<std::mutex> lock(mutex_);
         std::string childPrefix = wfxDir + "/";
         for (auto it = entries_.begin(); it != entries_.end(); ) {
             bool isDirItself = it->first == wfxDir;
@@ -110,15 +168,27 @@ public:
     }
 
     void clear() {
+        std::lock_guard<std::mutex> lock(mutex_);
         entries_.clear();
     }
 
+    // The number of entries held, expired ones included -- expiry is
+    // lazy, applied by get().
     size_t size() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         return entries_.size();
     }
 
 private:
-    std::map<std::string, std::vector<DirEntry>> entries_;
+    struct Entry {
+        std::vector<DirEntry> entries;
+        int64_t storedAt = 0;
+    };
+
+    mutable std::mutex mutex_;
+    ClockFn clock_;
+    int64_t ttlSeconds_;
+    std::map<std::string, Entry> entries_;
 };
 
 #endif // ADB_WFX_ADBUTILS_HPP
