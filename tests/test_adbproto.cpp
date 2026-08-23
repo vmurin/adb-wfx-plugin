@@ -340,3 +340,20 @@ TEST(DeviceStateSuite, offlineMessageMentionsReconnectingAndSerial) {
         msg.find("reconnect") != std::string::npos || msg.find("Reconnect") != std::string::npos;
     CHECK(mentionsReconnect);
 }
+
+// The host framing carries the payload length as exactly four hex digits,
+// so a service string of 65536 bytes or more cannot be described by it.
+// Silently emitting a truncated prefix would desynchronise the stream and
+// leave the server reading the tail of the request as the next one.
+
+TEST(EncodeHostRequestSuite, refusesAServiceTooLongForTheFourDigitLength) {
+    std::string tooLong(65536, 'x');
+    CHECK(encodeHostRequest(tooLong).empty());
+}
+
+TEST(EncodeHostRequestSuite, acceptsTheLargestRepresentableService) {
+    std::string largest(65535, 'x');
+    std::string encoded = encodeHostRequest(largest);
+    CHECK_EQ(encoded.size(), static_cast<size_t>(4 + 65535));
+    CHECK_STR_EQ(encoded.substr(0, 4), "ffff");
+}

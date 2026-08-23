@@ -206,8 +206,17 @@ inline time_t fileTimeToTime(const FILETIME& ft) {
         return 0; // a zero FILETIME means "unknown" in this SDK
     }
     uint64_t ticks = (static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
-    uint64_t seconds = (ticks - FILETIME_AT_UNIX_EPOCH) / FILETIME_TICKS_PER_SECOND;
-    return static_cast<time_t>(seconds);
+    // Dates before 1970 are legal (a scanned document, a deliberately
+    // back-dated archive) and the FILETIME epoch is 1601, so a smaller
+    // tick count is not an error. Subtracting in the other direction and
+    // negating keeps the whole computation inside the representable
+    // range: `ticks - FILETIME_AT_UNIX_EPOCH` in uint64_t would wrap to
+    // something astronomical and reach the device as `touch -d @<garbage>`.
+    if (ticks < FILETIME_AT_UNIX_EPOCH) {
+        uint64_t secondsBefore = (FILETIME_AT_UNIX_EPOCH - ticks) / FILETIME_TICKS_PER_SECOND;
+        return -static_cast<time_t>(secondsBefore);
+    }
+    return static_cast<time_t>((ticks - FILETIME_AT_UNIX_EPOCH) / FILETIME_TICKS_PER_SECOND);
 }
 
 #endif // ADB_WFX_UTILS_HPP

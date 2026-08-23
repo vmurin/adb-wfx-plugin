@@ -154,3 +154,30 @@ TEST(UtilsSuite, zeroFileTimeIsUnknownNotNegativeTime) {
     FILETIME zero = {0, 0};
     CHECK_EQ(fileTimeToTime(zero), static_cast<time_t>(0));
 }
+
+// A FILETIME earlier than the Unix epoch used to be computed as
+// `ticks - FILETIME_AT_UNIX_EPOCH` in uint64_t, which wraps to something
+// astronomically large and reaches the device as `touch -d @<garbage>`.
+// Dates before 1970 are rare but perfectly legal (scanned documents,
+// deliberately back-dated archives), and a wrong date is precisely the
+// defect this project exists to eliminate.
+
+TEST(UtilsSuite, fileTimeBeforeTheUnixEpochRoundTripsAsANegativeTime) {
+    const time_t nineteenSixty = -315619200; // 1960-01-01T00:00:00Z
+    FILETIME ft = timeToFileTime(nineteenSixty);
+    CHECK_EQ(fileTimeToTime(ft), nineteenSixty);
+}
+
+TEST(UtilsSuite, fileTimeOneSecondBeforeTheEpochIsMinusOneNotAHugeNumber) {
+    FILETIME ft = timeToFileTime(-1);
+    CHECK_EQ(fileTimeToTime(ft), static_cast<time_t>(-1));
+}
+
+TEST(UtilsSuite, aFileTimeFarBelowTheEpochStaysNegative) {
+    // Ticks well under FILETIME_AT_UNIX_EPOCH but not zero (zero means
+    // "unset" in this SDK and is handled separately above).
+    FILETIME ft;
+    ft.dwLowDateTime = 1;
+    ft.dwHighDateTime = 0;
+    CHECK(fileTimeToTime(ft) < 0);
+}

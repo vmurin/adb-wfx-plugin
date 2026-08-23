@@ -12,7 +12,10 @@ PATTERN='Lesser General Public|ivanenko|Sultanov|GNU General Public'
 violations=""
 
 while IFS= read -r -d '' file; do
-    if grep -Eq "$PATTERN" "$file"; then
+    # -i: the spec asked for a case-insensitive search. The pattern is
+    # deliberately NOT broadened to a bare "GPL" -- fsplugin.cpp's
+    # gPluginNr would match that and fail the check for nothing.
+    if grep -Eqi "$PATTERN" "$file"; then
         if [ "$(basename "$file")" != "README.md" ]; then
             violations="${violations}${file}"$'\n'
         fi

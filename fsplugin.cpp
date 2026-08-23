@@ -109,6 +109,11 @@ WFX_EXPORT int DCPCALL FsInitW(int pluginNr, tProgressProcW progressProc, tLogPr
             return TcpTransport::connectTo(ADB_SERVER_HOST, port, error);
         };
 
+        // Order matters on a second FsInitW: PluginCore holds an
+        // AdbClient& , so replacing the client first would leave the old
+        // core holding a dangling reference for the length of one
+        // statement. Tear the core down before the client it points at.
+        gPluginCore.reset();
         gAdbClient = std::make_unique<AdbClient>(std::move(factory));
         gPluginCore = std::make_unique<PluginCore>(*gAdbClient);
 

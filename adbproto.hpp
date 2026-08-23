@@ -57,10 +57,23 @@ constexpr uint32_t SYNC_DATA_MAX = 65536;
 constexpr uint32_t SYNC_PATH_MAX = 1024;
 constexpr int ADB_DEFAULT_PORT = 5037;
 
+// The largest payload the four-hex-digit length prefix can describe.
+constexpr size_t HOST_REQUEST_MAX_SIZE = 0xFFFF;
+
 // Frames a host-service request: 4 lowercase hex digits of the payload
 // length, followed by the payload itself. E.g. "host:version" (12 bytes)
 // becomes "000chost:version".
+//
+// Returns an empty string -- which callers must treat as "cannot be
+// encoded" -- for a service longer than HOST_REQUEST_MAX_SIZE. "%04x" of
+// 65536 is "10000", five digits, and truncating it to four would frame
+// the request as 4096 bytes: the server would then read the tail of this
+// request as the beginning of the next one. A real service string never
+// comes close, so this only ever fires on a bug.
 inline std::string encodeHostRequest(const std::string& service) {
+    if (service.size() > HOST_REQUEST_MAX_SIZE) {
+        return std::string();
+    }
     char lengthPrefix[5];
     std::snprintf(lengthPrefix, sizeof(lengthPrefix), "%04x",
                   static_cast<unsigned int>(service.size()));

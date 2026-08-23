@@ -411,6 +411,9 @@ public:
         if (error != nullptr) {
             error->clear();
         }
+        if (copyFlags & FS_COPYFLAGS_RESUME) {
+            return FS_FILE_NOTSUPPORTED;
+        }
         RemotePath rp = parseWfxPath(wfxRemote);
 
         DirEntry remoteInfo;
@@ -518,6 +521,9 @@ public:
                 const ProgressFn& progress, std::string* error) {
         if (error != nullptr) {
             error->clear();
+        }
+        if (copyFlags & FS_COPYFLAGS_RESUME) {
+            return FS_FILE_NOTSUPPORTED;
         }
         RemotePath rp = parseWfxPath(wfxRemote);
 
@@ -704,6 +710,29 @@ public:
             error->clear();
         }
         RemotePath rp = parseWfxPath(wfxRemote);
+
+        // `touch -c` is deliberately silent about a file that isn't
+        // there, and this transport carries no exit status -- so
+        // "produced no output" would otherwise read as success for a path
+        // that was never touched. -c is still what gets sent (dropping it
+        // would make touch CREATE the missing file, which is worse); the
+        // existence question is answered here instead.
+        DirEntry info;
+        bool exists = false;
+        AdbError statErr = client_.syncStat(rp.serial, rp.path, &info, &exists);
+        if (!statErr.ok) {
+            if (error != nullptr) {
+                *error = statErr.message;
+            }
+            return false;
+        }
+        if (!exists) {
+            if (error != nullptr) {
+                *error = "cannot set the time of " + rp.path + ": no such file or directory";
+            }
+            return false;
+        }
+
         std::string quoted = shellQuote(rp.path);
 
         std::string epochCommand = "touch -c -d @" + std::to_string(mtime) + " " + quoted;

@@ -100,6 +100,11 @@ inline AdbError readLengthPrefixedMessage(Transport* t, std::string* out) {
 // returns the server's message verbatim.
 inline AdbError sendRequestAndCheckStatus(Transport* t, const std::string& service) {
     std::string request = encodeHostRequest(service);
+    if (request.empty()) {
+        // encodeHostRequest's only failure mode, and unambiguous: even an
+        // empty service encodes to the four bytes "0000".
+        return makeError("request too long for the adb protocol");
+    }
     if (!t->writeAll(request.data(), request.size())) {
         return connectionError(*t, "failed to write request to adb server");
     }

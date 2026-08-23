@@ -702,6 +702,25 @@ TEST(AdbClientSuite, syncSendKeepsTheWriteErrorWhenNoFailPacketIsWaiting) {
     CHECK(err.message.find("failed to write DATA chunk") != std::string::npos);
 }
 
+TEST(AdbClientSuite, shellCommandRefusesACommandTooLongToFrame) {
+    // Unlike the sync services, shell: has no SYNC_PATH_MAX guard ahead
+    // of it, so an absurdly long path arriving from Double Commander
+    // really can produce a service string past the four-hex-digit length
+    // prefix. It must fail cleanly rather than write a truncated frame
+    // the server would parse as two requests.
+    std::string written;
+    auto transport = std::make_unique<RecordingTransport>(std::string("OKAY"), &written, nullptr);
+    AdbClient client(singleUseFactory(std::move(transport)));
+
+    std::string output;
+    AdbError err = client.shellCommand("SERIAL1", std::string(70000, 'x'), &output);
+
+    CHECK(!err.ok);
+    CHECK(err.message.find("too long") != std::string::npos);
+    // Only the host:transport: handshake went out -- no partial frame.
+    CHECK_STR_EQ(written, encodeHostRequest("host:transport:SERIAL1"));
+}
+
 // ---------------------------------------------------------------------
 // Cancellation while the socket is stalled.
 //

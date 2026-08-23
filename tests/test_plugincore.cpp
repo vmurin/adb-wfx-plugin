@@ -255,6 +255,11 @@ std::string dirStatScript() {
     return std::string("OKAY" "OKAY") + "STAT" + encodeStatBody(0040755, 4096, 1600000000);
 }
 
+// The scripted reply to a STAT that finds an ordinary file.
+std::string fileStatScript() {
+    return std::string("OKAY" "OKAY") + "STAT" + encodeStatBody(0100644, 1234, 1600000000);
+}
+
 void pushDirStat(QueueFactory* factory) {
     factory->push(std::make_unique<RecordingTransport>(dirStatScript(), nullptr, nullptr));
 }
@@ -1467,8 +1472,13 @@ TEST(ShellMutationSuite, setModificationTimeSendsExactQuotedTouchDCommand) {
     std::string command = "touch -c -d @" + std::to_string(mtime) + " " + shellQuote(path);
 
     std::string written;
-    auto transport = std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), &written, nullptr);
-    AdbClient client(singleUseFactory(std::move(transport)));
+    QueueFactory factory;
+    // touch -c is silent about a file that does not exist, so
+    // setModificationTime STATs the path first (see
+    // setModificationTimeRefusesAPathThatDoesNotExist below).
+    factory.push(std::make_unique<RecordingTransport>(fileStatScript(), nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), &written, nullptr));
+    AdbClient client(factory.asFactory());
     PluginCore core(client);
 
     std::string error;
@@ -1496,6 +1506,7 @@ TEST(ShellMutationSuite, setModificationTimeFallsBackToDashTFormWhenDashDFails) 
     QueueFactory factory;
     std::string written1;
     std::string written2;
+    factory.push(std::make_unique<RecordingTransport>(fileStatScript(), nullptr, nullptr));
     factory.push(std::make_unique<RecordingTransport>(
         std::string("OKAY" "OKAY") + "touch: unrecognized option '-d'\n", &written1, nullptr));
     factory.push(std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), &written2, nullptr));
@@ -1518,6 +1529,7 @@ TEST(ShellMutationSuite, setModificationTimeReturnsFalseWhenBothFormsFail) {
     std::string wfxPath = "/SERIAL1/sdcard/a.jpg";
 
     QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(fileStatScript(), nullptr, nullptr));
     factory.push(std::make_unique<RecordingTransport>(
         std::string("OKAY" "OKAY") + "touch: unrecognized option '-d'\n", nullptr, nullptr));
     factory.push(std::make_unique<RecordingTransport>(
@@ -1528,6 +1540,69 @@ TEST(ShellMutationSuite, setModificationTimeReturnsFalseWhenBothFormsFail) {
     std::string error;
     CHECK(!core.setModificationTime(wfxPath, 1000000000, &error));
     CHECK_STR_EQ(error, "touch: still no good");
+}
+
+TEST(ShellMutationSuite, setModificationTimeRefusesAPathThatDoesNotExist) {
+    // `touch -c` exits 0 and prints nothing for a file that isn't there,
+    // and this transport gives no exit status -- so without an existence
+    // check, setModificationTime cheerfully reported success for a path
+    // it never touched.
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(
+        std::string("OKAY" "OKAY") + "STAT" + encodeStatBody(0, 0, 0), nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    CHECK(!core.setModificationTime("/SERIAL1/sdcard/gone.jpg", 1434894309, &error));
+    CHECK(error.find("no such file or directory") != std::string::npos);
+    CHECK_EQ(factory.callCount(), 1); // no touch was attempted at all
+}
+
+// ---------------------------------------------------------------------
+// FS_COPYFLAGS_RESUME.
+//
+// Double Commander only offers Resume when a plugin has answered a copy
+// with FS_FILE_EXISTSRESUMEALLOWED, which this one never does -- so the
+// flag is latent rather than reachable today. Answering it with
+// FS_FILE_NOTSUPPORTED is still the only honest answer: neither the sync
+// protocol's RECV nor its SEND has an offset, so a "resume" here would
+// silently restart from zero and overwrite whatever was already there.
+// ---------------------------------------------------------------------
+
+TEST(ResumeSuite, getFileRejectsResumeWithoutTouchingTheDeviceOrTheLocalFile) {
+    TestTempDir dir;
+    std::string localPath = dir.path() + "/partial.bin";
+    writeFile(localPath, "already here");
+
+    QueueFactory factory; // deliberately empty: nothing may be requested
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    int result = core.getFile("/SERIAL1/sdcard/a.bin", localPath,
+                              FS_COPYFLAGS_OVERWRITE | FS_COPYFLAGS_RESUME, ProgressFn(), &error);
+
+    CHECK_EQ(result, FS_FILE_NOTSUPPORTED);
+    CHECK_EQ(factory.callCount(), 0);
+    CHECK_STR_EQ(readFile(localPath), "already here"); // untouched
+}
+
+TEST(ResumeSuite, putFileRejectsResumeWithoutTouchingTheDevice) {
+    TestTempDir dir;
+    std::string localPath = dir.path() + "/source.bin";
+    writeFile(localPath, "source bytes");
+
+    QueueFactory factory;
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    int result = core.putFile(localPath, "/SERIAL1/sdcard/a.bin",
+                              FS_COPYFLAGS_OVERWRITE | FS_COPYFLAGS_RESUME, ProgressFn(), &error);
+
+    CHECK_EQ(result, FS_FILE_NOTSUPPORTED);
+    CHECK_EQ(factory.callCount(), 0);
 }
 
 // ---------------------------------------------------------------------
@@ -1552,6 +1627,7 @@ TEST(ShellMutationSuite, setModificationTimeReturnsFalseWhenFallbackTimestampIsO
     std::string wfxPath = "/SERIAL1/sdcard/a.jpg";
 
     QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(fileStatScript(), nullptr, nullptr));
     factory.push(std::make_unique<RecordingTransport>(
         std::string("OKAY" "OKAY") + "touch: unrecognized option '-d'\n", nullptr, nullptr));
     AdbClient client(factory.asFactory());
@@ -1561,6 +1637,7 @@ TEST(ShellMutationSuite, setModificationTimeReturnsFalseWhenFallbackTimestampIsO
     CHECK(!core.setModificationTime(wfxPath, INT64_MAX, &error));
     CHECK(!error.empty());
     // The -t fallback must never be attempted with a timestamp that can't
-    // be formatted -- no second transport was even requested.
-    CHECK_EQ(factory.callCount(), 1);
+    // be formatted -- no further transport was requested after the STAT
+    // and the -d attempt.
+    CHECK_EQ(factory.callCount(), 2);
 }
