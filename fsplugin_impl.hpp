@@ -13,6 +13,7 @@
 #include "adbproto.hpp"
 #include "adbutils.hpp"
 #include "sdk.h"
+#include "utils.hpp"
 
 #include <cerrno>
 #include <cstdint>
@@ -36,6 +37,73 @@ struct FindResult {
     uint32_t unixMode = 0;
     bool isDir = false;
 };
+
+// ---------------------------------------------------------------------
+// fsplugin.cpp (Task 9) helpers.
+//
+// These serve the extern "C" shim, not PluginCore -- but constraints.md
+// #4 (header-only modules: only fsplugin.cpp and tests/*.cpp are
+// translation units) means they have to live in a header to be testable
+// directly, without dlopen'ing the built plugin. They live here, next to
+// FindResult, rather than in a header of their own, because YAGNI: one
+// small pair of free functions doesn't earn a third header.
+// ---------------------------------------------------------------------
+
+constexpr int TRANSFER_PERCENT_MIN = 0;
+constexpr int TRANSFER_PERCENT_MAX = 100;
+
+// done*100/total, clamped to 0..100. Computed entirely in uint64_t --
+// done*100 alone can reach roughly 2^64/100, far past any real transfer
+// size -- so a multi-gigabyte done/total pair cannot overflow before the
+// division the way it would in a 32-bit intermediate. total == 0 (nothing
+// to transfer, or the total is genuinely unknown) yields 0 rather than
+// dividing by zero.
+inline int computeTransferPercent(uint64_t done, uint64_t total) {
+    if (total == 0) {
+        return TRANSFER_PERCENT_MIN;
+    }
+    uint64_t percent = (done * static_cast<uint64_t>(TRANSFER_PERCENT_MAX)) / total;
+    if (percent > static_cast<uint64_t>(TRANSFER_PERCENT_MAX)) {
+        return TRANSFER_PERCENT_MAX;
+    }
+    return static_cast<int>(percent);
+}
+
+// Fills findData from entry, the shape WIN32_FIND_DATAW takes at the SDK
+// boundary. Every entry gets FILE_ATTRIBUTE_UNIX_MODE with the POSIX mode
+// packed into dwReserved0 (so Double Commander can show real
+// permissions); directories additionally get FILE_ATTRIBUTE_DIRECTORY.
+// Creation and last-access time are both set to the same value as the
+// last-write time -- the sync protocol carries only one timestamp per
+// entry, so there is nothing else to put there.
+//
+// Returns false, leaving *findData zeroed, when entry.name does not fit
+// MAX_PATH UTF-16 units: the caller must skip the entry rather than use a
+// truncated name that could refer to something else entirely.
+inline bool fillFindData(const FindResult& entry, WIN32_FIND_DATAW* findData) {
+    *findData = WIN32_FIND_DATAW{};
+
+    if (!utf8ToWideBuf(entry.name, findData->cFileName, MAX_PATH)) {
+        *findData = WIN32_FIND_DATAW{};
+        return false;
+    }
+
+    findData->dwFileAttributes = static_cast<DWORD>(FILE_ATTRIBUTE_UNIX_MODE);
+    if (entry.isDir) {
+        findData->dwFileAttributes |= static_cast<DWORD>(FILE_ATTRIBUTE_DIRECTORY);
+    }
+    findData->dwReserved0 = static_cast<DWORD>(entry.unixMode);
+
+    findData->nFileSizeLow = static_cast<DWORD>(entry.size & 0xFFFFFFFFULL);
+    findData->nFileSizeHigh = static_cast<DWORD>(entry.size >> 32);
+
+    FILETIME writeTime = timeToFileTime(static_cast<time_t>(entry.mtime));
+    findData->ftLastWriteTime = writeTime;
+    findData->ftCreationTime = writeTime;
+    findData->ftLastAccessTime = writeTime;
+
+    return true;
+}
 
 namespace plugincore_detail {
 
