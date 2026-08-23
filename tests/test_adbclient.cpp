@@ -70,18 +70,24 @@ TransportFactory singleUseFactory(std::unique_ptr<Transport> transport) {
 // never opens/creates/deletes local files itself.
 class TempFile {
 public:
-    TempFile() : fp_(std::tmpfile()) {}
+    TempFile() : fp_(std::tmpfile()) {
+        CHECK(fp_ != nullptr);
+    }
     ~TempFile() {
         if (fp_ != nullptr) {
             std::fclose(fp_);
         }
     }
-    int fd() const { return fileno(fp_); }
+    int fd() const { return fp_ != nullptr ? fileno(fp_) : -1; }
 
 private:
     FILE* fp_;
 };
 
+// Writes the whole of `content` starting at offset 0. A short or failed
+// write is a broken test fixture, not a scenario under test -- fail loudly
+// here rather than silently leaving less data in the file than the caller
+// asked for and surfacing as a baffling content mismatch somewhere else.
 void writeWholeFile(int fd, const std::string& content) {
     ::lseek(fd, 0, SEEK_SET);
     size_t done = 0;
@@ -92,6 +98,7 @@ void writeWholeFile(int fd, const std::string& content) {
         }
         done += static_cast<size_t>(n);
     }
+    CHECK_EQ(done, content.size());
     ::lseek(fd, 0, SEEK_SET);
 }
 
@@ -149,6 +156,24 @@ std::string encodeDent(uint32_t mode, uint32_t size, uint32_t mtime, const std::
 // header -- see constraints.md's sync protocol reference).
 std::string encodeListDone() {
     return std::string("DONE") + std::string(16, '\0');
+}
+
+// A DENT's fixed 16-byte header (mode + size + mtime + namelen) with no
+// name bytes following -- used to script a hostile namelen without having
+// to actually put that many bytes in the script. A correct implementation
+// must reject this before ever trying to read (or allocate for) the name.
+std::string encodeDentFixedHeader(uint32_t mode, uint32_t size, uint32_t mtime, uint32_t namelen) {
+    std::string s = "DENT";
+    unsigned char buf[4];
+    writeU32Le(buf, mode);
+    s.append(reinterpret_cast<char*>(buf), 4);
+    writeU32Le(buf, size);
+    s.append(reinterpret_cast<char*>(buf), 4);
+    writeU32Le(buf, mtime);
+    s.append(reinterpret_cast<char*>(buf), 4);
+    writeU32Le(buf, namelen);
+    s.append(reinterpret_cast<char*>(buf), 4);
+    return s;
 }
 
 std::string encodeStatBody(uint32_t mode, uint32_t size, uint32_t mtime) {
@@ -264,6 +289,45 @@ TEST(AdbClientSuite, syncListFailInsideSyncStreamSurfacesMessage) {
 }
 
 // ---------------------------------------------------------------------
+// Hostile wire lengths must fail cleanly, not attempt a huge allocation
+// ---------------------------------------------------------------------
+
+TEST(AdbClientSuite, syncListRejectsHostileDentNamelenWithoutHugeAllocation) {
+    // namelen = 0xFFFFFFFF, with no name bytes following in the script at
+    // all -- a correct implementation rejects this from the fixed 16-byte
+    // header alone, before ever trying to read (or size an allocation for)
+    // the name.
+    std::string script =
+        "OKAY" "OKAY" + encodeDentFixedHeader(0100644, 0, 0, 0xFFFFFFFF);
+    auto transport = std::make_unique<RecordingTransport>(script, nullptr, nullptr);
+    AdbClient client(singleUseFactory(std::move(transport)));
+
+    std::vector<DirEntry> entries;
+    AdbError err = client.syncList("SERIAL1", "/sdcard", &entries);
+
+    CHECK(!err.ok);
+    CHECK(!err.message.empty());
+    CHECK(entries.empty());
+}
+
+TEST(AdbClientSuite, syncRecvRejectsHostileFailLengthWithoutHugeAllocation) {
+    // A FAIL header claiming a 0xFFFFFFFF-byte message, with no message
+    // bytes following in the script -- must be rejected from the header
+    // alone, before ever trying to read (or size an allocation for) the
+    // message.
+    std::string script = "OKAY" "OKAY" + syncHeaderBytes("FAIL", 0xFFFFFFFF);
+    auto transport = std::make_unique<RecordingTransport>(script, nullptr, nullptr);
+    AdbClient client(singleUseFactory(std::move(transport)));
+
+    TempFile temp;
+    ProgressFn progress = [](uint64_t, uint64_t) { return true; };
+    AdbError err = client.syncRecv("SERIAL1", "/sdcard/f.bin", temp.fd(), 0, progress);
+
+    CHECK(!err.ok);
+    CHECK(!err.message.empty());
+}
+
+// ---------------------------------------------------------------------
 // syncStat
 // ---------------------------------------------------------------------
 
@@ -375,6 +439,11 @@ TEST(AdbClientSuite, syncRecvEofMidDataFails) {
     AdbError err = client.syncRecv("SERIAL1", "/sdcard/f.bin", temp.fd(), 1000, progress);
 
     CHECK(!err.ok);
+    CHECK(!err.message.empty());
+    // The chunk is read whole before any of it is written to the local
+    // file, so a short DATA chunk must leave nothing behind -- not the 200
+    // bytes that did arrive.
+    CHECK(readWholeFile(temp.fd()).empty());
 }
 
 TEST(AdbClientSuite, syncRecvFailSurfacesServerMessage) {
@@ -453,6 +522,16 @@ TEST(AdbClientSuite, syncSendSplitsIntoExactChunksAndPreservesMtime) {
 
     std::string doneHeader = syncHeaderBytes("DONE", static_cast<uint32_t>(mtime));
     CHECK_EQ(written.compare(offset, doneHeader.size(), doneHeader), 0);
+
+    // This is the headline criterion of the entire project: preserving
+    // modification times. Pin it a second time, independently of
+    // encodeSyncHeader (the same function the production code uses to build
+    // this very header), by decoding the id and the little-endian arg by
+    // hand straight out of the written byte stream.
+    CHECK_EQ(std::memcmp(written.data() + offset, "DONE", 4), 0);
+    CHECK_EQ(readU32Le(reinterpret_cast<const unsigned char*>(written.data()) + offset + 4),
+             static_cast<uint32_t>(mtime));
+
     offset += doneHeader.size();
 
     CHECK_EQ(offset, written.size());
@@ -555,6 +634,7 @@ TEST(AdbClientSuite, pathTooLongIsRejectedBeforeAnyIoForAllSyncMethods) {
         std::vector<DirEntry> entries;
         AdbError err = client.syncList("SERIAL1", longPath, &entries);
         CHECK(!err.ok);
+        CHECK(err.message.find(longPath) != std::string::npos);
         CHECK(!factoryCalled);
     }
     {
@@ -568,6 +648,7 @@ TEST(AdbClientSuite, pathTooLongIsRejectedBeforeAnyIoForAllSyncMethods) {
         bool exists = false;
         AdbError err = client.syncStat("SERIAL1", longPath, &entry, &exists);
         CHECK(!err.ok);
+        CHECK(err.message.find(longPath) != std::string::npos);
         CHECK(!factoryCalled);
     }
     {
@@ -581,6 +662,7 @@ TEST(AdbClientSuite, pathTooLongIsRejectedBeforeAnyIoForAllSyncMethods) {
         ProgressFn progress = [](uint64_t, uint64_t) { return true; };
         AdbError err = client.syncRecv("SERIAL1", longPath, temp.fd(), 0, progress);
         CHECK(!err.ok);
+        CHECK(err.message.find(longPath) != std::string::npos);
         CHECK(!factoryCalled);
     }
     {
@@ -594,6 +676,7 @@ TEST(AdbClientSuite, pathTooLongIsRejectedBeforeAnyIoForAllSyncMethods) {
         ProgressFn progress = [](uint64_t, uint64_t) { return true; };
         AdbError err = client.syncSend("SERIAL1", temp.fd(), 0, longPath, 0644, 0, progress);
         CHECK(!err.ok);
+        CHECK(err.message.find(longPath) != std::string::npos);
         CHECK(!factoryCalled);
     }
 }

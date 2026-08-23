@@ -142,8 +142,8 @@ inline bool syncIdIs(const SyncHeader& h, const char* id) {
 // byte count rather than by adding namelen to a pointer or offset.
 inline bool parseDentBody(const unsigned char* p, size_t avail, DirEntry* out,
                            size_t* consumed) {
-    constexpr size_t kFixedHeaderSize = 16; // mode + size + mtime + namelen
-    if (avail < kFixedHeaderSize) {
+    constexpr size_t DENT_FIXED_HEADER_SIZE = 16; // mode + size + mtime + namelen
+    if (avail < DENT_FIXED_HEADER_SIZE) {
         return false;
     }
 
@@ -152,7 +152,7 @@ inline bool parseDentBody(const unsigned char* p, size_t avail, DirEntry* out,
     uint32_t mtime = readU32Le(p + 8);
     uint32_t namelen = readU32Le(p + 12);
 
-    size_t remaining = avail - kFixedHeaderSize;
+    size_t remaining = avail - DENT_FIXED_HEADER_SIZE;
     if (namelen > remaining) {
         return false;
     }
@@ -160,8 +160,8 @@ inline bool parseDentBody(const unsigned char* p, size_t avail, DirEntry* out,
     out->mode = mode;
     out->size = size;
     out->mtime = static_cast<int64_t>(mtime);
-    out->name.assign(reinterpret_cast<const char*>(p + kFixedHeaderSize), namelen);
-    *consumed = kFixedHeaderSize + namelen;
+    out->name.assign(reinterpret_cast<const char*>(p + DENT_FIXED_HEADER_SIZE), namelen);
+    *consumed = DENT_FIXED_HEADER_SIZE + namelen;
     return true;
 }
 
@@ -233,10 +233,10 @@ inline std::vector<DeviceInfo> parseDevicesL(const std::string& text) {
                 device.serial = fields[0];
                 device.state = fields[1];
                 for (size_t i = 2; i < fields.size(); ++i) {
-                    constexpr char kModelPrefix[] = "model:";
-                    constexpr size_t kModelPrefixLen = sizeof(kModelPrefix) - 1;
-                    if (fields[i].compare(0, kModelPrefixLen, kModelPrefix) == 0) {
-                        device.model = fields[i].substr(kModelPrefixLen);
+                    constexpr char MODEL_PREFIX[] = "model:";
+                    constexpr size_t MODEL_PREFIX_LEN = sizeof(MODEL_PREFIX) - 1;
+                    if (fields[i].compare(0, MODEL_PREFIX_LEN, MODEL_PREFIX) == 0) {
+                        device.model = fields[i].substr(MODEL_PREFIX_LEN);
                     }
                 }
                 devices.push_back(std::move(device));

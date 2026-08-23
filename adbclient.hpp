@@ -41,6 +41,27 @@ namespace adbclient_detail {
 // Bytes read at a time while draining shell: output to EOF.
 constexpr size_t SHELL_READ_CHUNK_SIZE = 4096;
 
+// Upper bound on a sync-protocol FAIL message length. This is an error
+// message meant for a dialog box, not a data transfer -- there is no
+// legitimate reason for adb to send anywhere near this much, so a header
+// claiming more is treated as a desynchronized stream rather than honored
+// with a multi-gigabyte allocation.
+constexpr uint32_t SYNC_FAIL_MESSAGE_MAX = 65536;
+
+// Appends ": <strerror(errno)>" so a local-file I/O failure (disk full,
+// permission denied, bad fd, ...) is distinguishable in the error the user
+// eventually sees, the same way connectionError() does for Transport
+// failures. errno == 0 means the failure was a clean 0-byte result (EOF
+// before the expected number of bytes was read, or a 0-byte write) rather
+// than an actual error, so strerror(0) ("Success") would be misleading --
+// report that case in plain words instead.
+inline std::string withErrno(const std::string& what) {
+    if (errno == 0) {
+        return what + ": unexpected end of file";
+    }
+    return what + ": " + std::strerror(errno);
+}
+
 inline AdbError makeError(std::string message) {
     return AdbError{false, std::move(message)};
 }
@@ -128,6 +149,14 @@ inline bool readSyncHeader(Transport* t, SyncHeader* out) {
 // consumed from the 8-byte header by the caller) and turns it into an
 // AdbError.
 inline AdbError readSyncFailMessage(Transport* t, uint32_t len) {
+    // len comes straight off the wire; a desynchronized stream (or a
+    // future v2-sync server) could hand back garbage here, and this is
+    // reached from the error path -- exactly where that is likeliest. Bound
+    // it before allocating so a bad length fails cleanly instead of
+    // attempting a multi-gigabyte allocation.
+    if (len > SYNC_FAIL_MESSAGE_MAX) {
+        return makeError("oversized FAIL message from adb server");
+    }
     std::string message;
     message.assign(len, '\0');
     if (len > 0 && !t->readExactly(&message[0], len)) {
@@ -165,16 +194,26 @@ inline AdbError readListEntry(Transport* t, DirEntry* outEntry, bool* isDent, bo
         return makeError("malformed LIST reply from adb server");
     }
 
-    constexpr size_t kFixedFieldsSize = 16; // mode + size + mtime + namelen
-    unsigned char fixed[kFixedFieldsSize];
+    constexpr size_t DENT_FIXED_HEADER_SIZE = 16; // mode + size + mtime + namelen
+    unsigned char fixed[DENT_FIXED_HEADER_SIZE];
     if (!t->readExactly(fixed, sizeof(fixed))) {
         return connectionError(*t, "failed to read LIST entry from adb server");
     }
     uint32_t namelen = readU32Le(fixed + 12);
 
-    std::vector<unsigned char> block(kFixedFieldsSize + namelen);
-    std::memcpy(block.data(), fixed, kFixedFieldsSize);
-    if (namelen > 0 && !t->readExactly(block.data() + kFixedFieldsSize, namelen)) {
+    // namelen comes straight off the wire. parseDentBody's own "hostile
+    // namelen" guard (adbproto.hpp) can never fire here because `block` is
+    // always constructed to hold exactly namelen bytes of name -- so the
+    // bound has to be enforced before the allocation, not after it. A real
+    // filename cannot exceed SYNC_PATH_MAX; anything larger means a
+    // desynchronized stream, not a legitimate long name.
+    if (namelen > SYNC_PATH_MAX) {
+        return makeError("malformed DENT entry from adb server: name too long");
+    }
+
+    std::vector<unsigned char> block(DENT_FIXED_HEADER_SIZE + namelen);
+    std::memcpy(block.data(), fixed, DENT_FIXED_HEADER_SIZE);
+    if (namelen > 0 && !t->readExactly(block.data() + DENT_FIXED_HEADER_SIZE, namelen)) {
         return connectionError(*t, "failed to read LIST entry name from adb server");
     }
 
@@ -209,6 +248,7 @@ inline bool writeAllToFd(int fd, const unsigned char* buf, size_t n) {
             return false;
         }
         if (result == 0) {
+            errno = 0; // not a real error -- see withErrno()'s errno == 0 case
             return false;
         }
         done += static_cast<size_t>(result);
@@ -229,6 +269,7 @@ inline bool readAllFromFd(int fd, unsigned char* buf, size_t n) {
             return false;
         }
         if (result == 0) {
+            errno = 0; // not a real error -- see withErrno()'s errno == 0 case
             return false;
         }
         done += static_cast<size_t>(result);
@@ -426,8 +467,12 @@ public:
                 return readErr;
             }
             if (!adbclient_detail::writeAllToFd(localFd, buffer.data(), header.arg)) {
+                // errno must be captured before any other call (including
+                // close()) has a chance to clobber it.
+                AdbError writeErr =
+                    adbclient_detail::makeError(adbclient_detail::withErrno("failed to write to local file"));
                 t->close();
-                return adbclient_detail::makeError("failed to write to local file");
+                return writeErr;
             }
 
             done += header.arg;
@@ -469,8 +514,12 @@ public:
             uint32_t chunkLen = static_cast<uint32_t>(std::min<uint64_t>(remaining, SYNC_DATA_MAX));
 
             if (!adbclient_detail::readAllFromFd(localFd, buffer.data(), chunkLen)) {
+                // errno must be captured before any other call (including
+                // close()) has a chance to clobber it.
+                AdbError readErr =
+                    adbclient_detail::makeError(adbclient_detail::withErrno("failed to read from local file"));
                 t->close();
-                return adbclient_detail::makeError("failed to read from local file");
+                return readErr;
             }
             if (!adbclient_detail::writeSyncPacket(t.get(), "DATA", chunkLen, buffer.data(), chunkLen)) {
                 AdbError writeErr = adbclient_detail::connectionError(*t, "failed to write DATA chunk");
