@@ -116,7 +116,71 @@ TEST(AdbBinaryCandidatesSuite, noPathAtAllStillYieldsFallbacks) {
     auto getEnv = envFrom({});
     std::vector<std::string> candidates = adbBinaryCandidates(getEnv);
     CHECK(!candidates.empty());
-    CHECK_STR_EQ(candidates.back(), "/usr/local/share/android-commandlinetools/platform-tools/adb");
+    // The snap shim is deliberately last: it is the slowest to start and the
+    // least likely to be the one the user means.
+    CHECK_STR_EQ(candidates.back(), "/snap/bin/adb");
+}
+
+TEST(AdbBinaryCandidatesSuite, linuxInstallLocationsAreOffered) {
+    auto getEnv = envFrom({{"HOME", "/home/tester"}});
+    std::vector<std::string> candidates = adbBinaryCandidates(getEnv);
+
+    for (const char* expected : {"/usr/bin/adb",
+                                 "/usr/lib/android-sdk/platform-tools/adb",
+                                 "/opt/android-sdk/platform-tools/adb",
+                                 "/home/tester/Android/Sdk/platform-tools/adb",
+                                 "/snap/bin/adb"}) {
+        bool found = false;
+        for (const std::string& c : candidates) {
+            if (c == expected) {
+                found = true;
+            }
+        }
+        CHECK(found);
+    }
+}
+
+TEST(AdbBinaryCandidatesSuite, androidHomeIsConsultedBeforeTheHardcodedLocations) {
+    auto getEnv = envFrom({{"ANDROID_HOME", "/sdk"}});
+    std::vector<std::string> candidates = adbBinaryCandidates(getEnv);
+
+    CHECK(!candidates.empty());
+    CHECK_STR_EQ(candidates[0], "/sdk/platform-tools/adb");
+}
+
+TEST(AdbBinaryCandidatesSuite, androidSdkRootIsConsultedToo) {
+    auto getEnv = envFrom({{"ANDROID_SDK_ROOT", "/sdkroot"}});
+    std::vector<std::string> candidates = adbBinaryCandidates(getEnv);
+
+    CHECK(!candidates.empty());
+    CHECK_STR_EQ(candidates[0], "/sdkroot/platform-tools/adb");
+}
+
+TEST(AdbBinaryCandidatesSuite, androidHomeOutranksAndroidSdkRoot) {
+    auto getEnv = envFrom({{"ANDROID_HOME", "/a"}, {"ANDROID_SDK_ROOT", "/b"}});
+    std::vector<std::string> candidates = adbBinaryCandidates(getEnv);
+
+    CHECK(candidates.size() >= 2);
+    CHECK_STR_EQ(candidates[0], "/a/platform-tools/adb");
+    CHECK_STR_EQ(candidates[1], "/b/platform-tools/adb");
+}
+
+TEST(AdbBinaryCandidatesSuite, emptySdkEnvVarsAreIgnored) {
+    auto getEnv = envFrom({{"ANDROID_HOME", ""}, {"ANDROID_SDK_ROOT", ""}});
+    std::vector<std::string> candidates = adbBinaryCandidates(getEnv);
+
+    for (const std::string& c : candidates) {
+        CHECK(c != "/platform-tools/adb");
+    }
+}
+
+TEST(AdbBinaryCandidatesSuite, adbPathStillOutranksTheSdkEnvVars) {
+    auto getEnv = envFrom({{"ADB_PATH", "/custom/adb"}, {"ANDROID_HOME", "/sdk"}});
+    std::vector<std::string> candidates = adbBinaryCandidates(getEnv);
+
+    CHECK(candidates.size() >= 2);
+    CHECK_STR_EQ(candidates[0], "/custom/adb");
+    CHECK_STR_EQ(candidates[1], "/sdk/platform-tools/adb");
 }
 
 TEST(AdbBinaryCandidatesSuite, duplicatePathEntriesDoNotDuplicateCandidates) {

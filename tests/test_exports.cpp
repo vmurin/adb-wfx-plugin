@@ -102,7 +102,11 @@ TEST(ExportsSuite, fsGetDefRootNameYieldsADB) {
     void* sym = dlsym(handle, "FsGetDefRootName");
     CHECK(sym != nullptr);
     if (sym != nullptr) {
-        using FsGetDefRootNameFn = void (*)(char*, int);
+        // DCPCALL, not a bare (*): it is empty on macOS and Linux but expands
+        // to __stdcall on Windows, and calling a stdcall export through a
+        // cdecl pointer corrupts the stack on x86. Wrong here today would be
+        // invisible until the first Windows build.
+        using FsGetDefRootNameFn = void(DCPCALL*)(char*, int);
         auto fn = reinterpret_cast<FsGetDefRootNameFn>(sym);
         char buf[MAX_PATH];
         std::memset(buf, 'Z', sizeof(buf));

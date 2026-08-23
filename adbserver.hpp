@@ -68,12 +68,15 @@ inline std::vector<std::string> splitPath(const std::string& path) {
 // Candidate absolute paths for the adb binary, in priority order:
 //   1. $ADB_PATH if set
 //   2. each PATH element + "/adb"
-//   3. /opt/homebrew/share/android-commandlinetools/platform-tools/adb
-//   4. /opt/homebrew/bin/adb
-//   5. /usr/local/bin/adb
-//   6. $HOME/Library/Android/sdk/platform-tools/adb
-//   7. /usr/local/share/android-commandlinetools/platform-tools/adb
+//   3. $ANDROID_HOME/platform-tools/adb, then $ANDROID_SDK_ROOT/platform-tools/adb
+//   4. the macOS install locations (Homebrew, /usr/local, ~/Library/Android/sdk)
+//   5. the Linux install locations (/usr/bin, distro SDK packages, ~/Android/Sdk, snap)
 // De-duplicates while preserving first-seen order.
+//
+// Both OSes' locations are offered on both OSes rather than being split behind
+// an #ifdef: a path that does not exist is one failed isExecutable() call, the
+// de-dup below already makes ordering the only observable, and keeping the list
+// unconditional means the unit suite exercises the same list everywhere.
 inline std::vector<std::string> adbBinaryCandidates(
         const std::function<const char*(const char*)>& getEnv) {
     std::vector<std::string> candidates;
@@ -101,6 +104,16 @@ inline std::vector<std::string> adbBinaryCandidates(
         }
     }
 
+    // The SDK's own environment variables, which an Android Studio or
+    // command-line-tools install sets and which nothing above consults.
+    for (const char* sdkVar : {"ANDROID_HOME", "ANDROID_SDK_ROOT"}) {
+        const char* sdkRoot = getEnv(sdkVar);
+        if (sdkRoot != nullptr && sdkRoot[0] != '\0') {
+            addCandidate(std::string(sdkRoot) + "/platform-tools/adb");
+        }
+    }
+
+    // macOS.
     addCandidate("/opt/homebrew/share/android-commandlinetools/platform-tools/adb");
     addCandidate("/opt/homebrew/bin/adb");
     addCandidate("/usr/local/bin/adb");
@@ -111,6 +124,19 @@ inline std::vector<std::string> adbBinaryCandidates(
     }
 
     addCandidate("/usr/local/share/android-commandlinetools/platform-tools/adb");
+
+    // Linux. /usr/lib/android-sdk is the Debian/Ubuntu "adb" package layout,
+    // /opt/android-sdk the Arch one; ~/Android/Sdk is where Android Studio puts
+    // it; /snap/bin/adb is the snap shim.
+    addCandidate("/usr/bin/adb");
+    addCandidate("/usr/lib/android-sdk/platform-tools/adb");
+    addCandidate("/opt/android-sdk/platform-tools/adb");
+
+    if (home != nullptr && home[0] != '\0') {
+        addCandidate(std::string(home) + "/Android/Sdk/platform-tools/adb");
+    }
+
+    addCandidate("/snap/bin/adb");
 
     return candidates;
 }
