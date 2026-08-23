@@ -221,21 +221,30 @@ WFX_EXPORT int DCPCALL FsRenMovFileW(WCHAR* oldName, WCHAR* newName, BOOL move, 
         std::string wfxTo = wideToUtf8(newName);
         std::string error;
         bool crossDevice = false;
+        bool targetExists = false;
         bool ok = gPluginCore->renameOrMove(wfxFrom, wfxTo, move != 0, overWrite != 0, &error,
-                                            &crossDevice);
+                                            &crossDevice, &targetExists);
         if (ok) {
             return FS_FILE_OK;
         }
         reportError(gLogProcW, gPluginNr, error);
-        // Only a cross-device rejection maps to FS_FILE_NOTSUPPORTED,
-        // telling DC to fall back to its own get+put+delete emulation --
-        // the one failure mode that fallback can actually fix. Every
-        // other failure (a refused overwrite, a shell error, a dropped
-        // transport) maps to FS_FILE_WRITEERROR instead: retrying the
-        // identical operation as a download+upload+delete would not fix
-        // a genuine error, and for a multi-gigabyte file wastes minutes
-        // attributing the failure to the wrong step (see task-9 review
-        // round 1).
+        // A refused overwrite maps to FS_FILE_EXISTS -- the same code
+        // getFile/putFile already return for the identical situation
+        // (wfxplugin.h defines it for exactly "target exists and
+        // OverWrite was false") -- checked ahead of crossDevice since the
+        // two are mutually exclusive by construction (PluginCore checks
+        // cross-device before ever reaching the overwrite check). A
+        // cross-device rejection maps to FS_FILE_NOTSUPPORTED, telling DC
+        // to fall back to its own get+put+delete emulation -- the one
+        // remaining failure mode that fallback can actually fix. Every
+        // other failure (a shell error, a dropped transport) maps to
+        // FS_FILE_WRITEERROR instead: retrying the identical operation as
+        // a download+upload+delete would not fix a genuine error, and for
+        // a multi-gigabyte file wastes minutes attributing the failure to
+        // the wrong step (see task-9 review rounds 1-2).
+        if (targetExists) {
+            return FS_FILE_EXISTS;
+        }
         return crossDevice ? FS_FILE_NOTSUPPORTED : FS_FILE_WRITEERROR;
     } catch (...) {
         return FS_FILE_WRITEERROR;

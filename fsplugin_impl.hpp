@@ -550,17 +550,21 @@ public:
         return runMutatingShellCommand(rp, "mkdir -p " + shellQuote(rp.path), wfxRemote, error);
     }
 
-    // crossDevice, if non-null, is cleared at the start and set to true
-    // only for the specific failure "wfxFrom and wfxTo name different
-    // devices" -- the one failure mode where Double Commander's own
-    // copy+delete fallback (FS_FILE_NOTSUPPORTED, fsplugin.cpp) can
-    // actually succeed. Every other failure leaves it false: retrying the
-    // same operation as a download+upload+delete would not fix a genuine
-    // error (permission denied, a dropped transport, a refused overwrite),
-    // and for a multi-gigabyte file wastes minutes attributing the
-    // failure to the wrong step.
+    // crossDevice and targetExists, if non-null, are both cleared at the
+    // start and each set to true only for its own specific failure --
+    // "wfxFrom and wfxTo name different devices" for the former, "the
+    // target exists and overwrite is false" for the latter -- so
+    // fsplugin.cpp can map each to the SDK code Double Commander actually
+    // needs (FS_FILE_NOTSUPPORTED, the one case its own copy+delete
+    // fallback can fix; FS_FILE_EXISTS, matching the code getFile/putFile
+    // already return for the identical situation) without string-matching
+    // *error. Every other failure leaves both false: retrying via that
+    // fallback would not fix a genuine error (permission denied, a
+    // dropped transport), and for a multi-gigabyte file wastes minutes
+    // attributing the failure to the wrong step.
     bool renameOrMove(const std::string& wfxFrom, const std::string& wfxTo, bool move,
-                      bool overwrite, std::string* error, bool* crossDevice = nullptr) {
+                      bool overwrite, std::string* error, bool* crossDevice = nullptr,
+                      bool* targetExists = nullptr) {
         // A same-directory rename and a cross-directory move both land on
         // the same "mv" against the device's single filesystem tree --
         // the distinction only matters to Double Commander's UI, never to
@@ -572,6 +576,9 @@ public:
         }
         if (crossDevice != nullptr) {
             *crossDevice = false;
+        }
+        if (targetExists != nullptr) {
+            *targetExists = false;
         }
         RemotePath rpFrom = parseWfxPath(wfxFrom);
         RemotePath rpTo = parseWfxPath(wfxTo);
@@ -601,17 +608,21 @@ public:
             // lean on, so the only reliable way to honor "don't
             // overwrite" is to check first and never send -n at all.
             DirEntry targetInfo;
-            bool targetExists = false;
-            AdbError statErr = client_.syncStat(rpTo.serial, rpTo.path, &targetInfo, &targetExists);
+            bool targetAlreadyExists = false;
+            AdbError statErr =
+                client_.syncStat(rpTo.serial, rpTo.path, &targetInfo, &targetAlreadyExists);
             if (!statErr.ok) {
                 if (error != nullptr) {
                     *error = statErr.message;
                 }
                 return false;
             }
-            if (targetExists) {
+            if (targetAlreadyExists) {
                 if (error != nullptr) {
                     *error = "target already exists";
+                }
+                if (targetExists != nullptr) {
+                    *targetExists = true;
                 }
                 return false;
             }

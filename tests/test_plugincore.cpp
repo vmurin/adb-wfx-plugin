@@ -1014,6 +1014,62 @@ TEST(ShellMutationSuite, renameOrMoveGenericFailureLeavesCrossDeviceFalse) {
     CHECK(!crossDevice);
 }
 
+TEST(ShellMutationSuite, renameOrMoveWithoutOverwriteAndExistingTargetSetsTargetExistsOutParam) {
+    // Task 9 review round 2: FsRenMovFileW needs to map a refused
+    // overwrite to FS_FILE_EXISTS specifically (the SDK code the getFile/
+    // putFile overwrite checks already use), not the generic
+    // FS_FILE_WRITEERROR a plain bool can't distinguish from any other
+    // failure. targetExists is that signal.
+    std::string wfxFrom = "/SERIAL1/sdcard/a.jpg";
+    std::string wfxTo = "/SERIAL1/sdcard/existing.jpg";
+    std::string statScript = "OKAY" "OKAY" "STAT" + encodeStatBody(0100644, 10, 1600000000); // exists
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    bool targetExists = false;
+    bool ok = core.renameOrMove(wfxFrom, wfxTo, /*move=*/false, /*overwrite=*/false, &error,
+                                /*crossDevice=*/nullptr, &targetExists);
+
+    CHECK(!ok);
+    CHECK(targetExists);
+}
+
+TEST(ShellMutationSuite, renameOrMoveGenericFailureLeavesTargetExistsFalse) {
+    std::string errorText = "mv: can't rename '/a': No such file or directory\n";
+    std::string script = "OKAY" "OKAY" + errorText;
+    auto transport = std::make_unique<RecordingTransport>(script, nullptr, nullptr);
+    AdbClient client(singleUseFactory(std::move(transport)));
+    PluginCore core(client);
+
+    std::string error;
+    bool targetExists = true; // deliberately pre-set to the wrong value
+    bool ok = core.renameOrMove("/SERIAL1/a", "/SERIAL1/b", true, true, &error,
+                                /*crossDevice=*/nullptr, &targetExists);
+
+    CHECK(!ok);
+    CHECK(!targetExists);
+}
+
+TEST(ShellMutationSuite, renameOrMoveCrossDeviceLeavesTargetExistsFalse) {
+    TransportFactory factory = [](std::string*) -> std::unique_ptr<Transport> {
+        return nullptr; // never reached: rejected before any transport is opened
+    };
+    AdbClient client(factory);
+    PluginCore core(client);
+
+    std::string error;
+    bool targetExists = true; // deliberately pre-set to the wrong value
+    bool ok = core.renameOrMove("/DEVICE_A/a", "/DEVICE_B/b", true, true, &error,
+                                /*crossDevice=*/nullptr, &targetExists);
+
+    CHECK(!ok);
+    CHECK(!targetExists);
+}
+
 TEST(ShellMutationSuite, setModificationTimeSendsExactQuotedTouchDCommand) {
     std::string serial = "SERIAL1";
     std::string path = std::string(TRICKY_REMOTE_PATH);
