@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (dry run; nothing is published)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  # Refuses the whole release if the tag and version.h disagree, before any
+  # runner minutes go into building five artifacts nobody can publish.
+  guard:
+    name: Version guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match version.h and CHANGELOG.md
+        run: ./scripts/check-version.sh "${{ github.event.inputs.tag || github.ref_name }}"
+
+  build:
+    name: ${{ matrix.name }}
+    needs: guard
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS universal
+            runner: macos-14
+            suffix: macos-universal
+            universal: true
+          # Built on the oldest supported Ubuntu on purpose: a binary linked
+          # against a newer glibc will not start on an older distribution,
+          # and the reverse is fine.
+          - name: Linux x86_64
+            runner: ubuntu-22.04
+            suffix: linux-x86_64
+            universal: false
+          - name: Linux aarch64
+            runner: ubuntu-24.04-arm
+            suffix: linux-aarch64
+            universal: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unit suite
+        run: ./run_tests.sh
+
+      - name: Build release binary
+        run: |
+          if [ "${{ matrix.universal }}" = "true" ]; then
+            ./build.sh --universal
+            lipo -info fsplugin.wfx64
+          else
+            ./build.sh
+          fi
+          ./scripts/check-exports.sh
+
+      # An unsigned dylib downloaded from the internet is refused by Gatekeeper.
+      # An ad-hoc signature is not notarisation, but it is what lets the file
+      # load once the user has cleared the quarantine attribute.
+      - name: Ad-hoc codesign (macOS)
+        if: matrix.universal == true
+        run: codesign --force --sign - --timestamp=none fsplugin.wfx64
+
+      - name: Confirm the built binary carries the tagged version
+        run: ./tests/bin/device_driver --version
+
+      - name: Package
+        run: ./scripts/package.sh "${{ matrix.suffix }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adb-wfx-${{ matrix.suffix }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum *.zip | tee SHA256SUMS
+
+      - name: Release notes from CHANGELOG.md
+        run: ./scripts/release-notes.sh "${{ github.ref_name }}" > notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.zip
+            artifacts/SHA256SUMS
+          body_path: notes.md
+          prerelease: ${{ contains(github.ref_name, '-') }}

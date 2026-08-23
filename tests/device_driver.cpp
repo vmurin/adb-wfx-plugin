@@ -22,6 +22,7 @@
 #include "../adbserver.hpp"
 #include "../fsplugin_impl.hpp"
 #include "../transport.hpp"
+#include "../version.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -75,6 +76,7 @@ void printUsage() {
         "  settime <wfxremote> <epochSeconds>\n"
         "  settime-t <wfxremote> <epochSeconds>\n"
         "  cachettl <wfxdir> <sleep1Seconds> <sleep2Seconds>\n"
+        "  --version\n"
         "\n"
         "wfxpath/wfxremote/wfxfrom/wfxto are WFX-style paths:\n"
         "  \"/<serial>/<on-device-absolute-path>\", e.g.\n"
@@ -424,6 +426,16 @@ int main(int argc, char** argv) {
             return EXIT_USAGE;
         }
         std::string command = argv[1];
+
+        // Answered before a client is built: --version must work with no adb
+        // server running and no device attached, because the release workflow
+        // uses it to confirm the binary it just built carries the tagged
+        // version.
+        if (command == "--version" || command == "-v") {
+            std::cout << "adb-wfx " << ADB_WFX_VERSION << "\n";
+            return 0;
+        }
+
         std::unique_ptr<AdbClient> client = makeClient();
 
         if (command == "list") {

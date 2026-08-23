@@ -1,0 +1,5 @@
+[plugininstall]
+description=adb-wfx @VERSION@ - browse Android devices over ADB, modification dates preserved
+type=wfx
+file=fsplugin.wfx64
+defaultdir=adb
