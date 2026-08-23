@@ -431,8 +431,15 @@ TEST(ListDirectorySuite, mapsDentModesToIsDirAndDropsDotEntries) {
                           encodeDent(0120777, 0, 1600000003, "link") +
                           encodeListDone();
 
-    auto transport = std::make_unique<RecordingTransport>(script, nullptr, nullptr);
-    AdbClient client(singleUseFactory(std::move(transport)));
+    // "link" is a symlink, so listDirectory re-stats it through "/." to
+    // decide whether it is navigable; here it resolves to a regular file.
+    std::string statScript = std::string("OKAY" "OKAY") + "STAT" +
+                              encodeStatBody(0100644, 99, 1600000004);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(script, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
     PluginCore core(client);
 
     std::vector<FindResult> entries;
@@ -457,6 +464,214 @@ TEST(ListDirectorySuite, mapsDentModesToIsDirAndDropsDotEntries) {
     CHECK_STR_EQ(entries[2].name, "link");
     CHECK(!entries[2].isDir);
     CHECK_EQ(entries[2].unixMode, static_cast<uint32_t>(0120777));
+}
+
+// ---------------------------------------------------------------------
+// Symlink classification.
+//
+// adbd's do_list/do_stat both use lstat, so on every modern Android
+// device the entries that matter most -- /sdcard above all, plus /etc,
+// /d, /vendor, /bin, /odm, /product -- arrive with mode 0120777 and
+// DirEntry::isDir() false. Rendering them as 21-byte files makes the
+// single most common destination on the phone un-openable. listDirectory
+// therefore re-stats each symlink through a trailing "/." (lstat on a
+// path ending in "/." resolves through the link) and classifies the
+// entry by what the link points AT. Symlinks are still never *followed*
+// for transfer purposes -- this only fixes navigation.
+// ---------------------------------------------------------------------
+
+TEST(SymlinkSuite, symlinkToDirectoryIsListedAsADirectory) {
+    std::string serial = "SERIAL1";
+    std::string listScript = "OKAY" "OKAY" +
+                              encodeDent(0120777, 21, 1600000000, "sdcard") +
+                              encodeListDone();
+    // lstat("/sdcard/.") resolves through the link and lands on the real
+    // directory it points at.
+    std::string statScript = std::string("OKAY" "OKAY") + "STAT" +
+                              encodeStatBody(0040771, 4096, 1600000009);
+
+    QueueFactory factory;
+    std::string statWritten;
+    factory.push(std::make_unique<RecordingTransport>(listScript, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(statScript, &statWritten, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::vector<FindResult> entries;
+    std::string warning;
+    std::string error;
+    CHECK(core.listDirectory("/" + serial, &entries, &warning, &error));
+
+    CHECK_EQ(entries.size(), static_cast<size_t>(1));
+    CHECK_STR_EQ(entries[0].name, "sdcard");
+    CHECK(entries[0].isDir);
+    // The mode still describes the link itself -- only the navigability
+    // decision changed.
+    CHECK_EQ(entries[0].unixMode, static_cast<uint32_t>(0120777));
+
+    std::string resolvedPath = "/sdcard/.";
+    std::string expectedStat = encodeHostRequest("host:transport:" + serial) +
+                                encodeHostRequest("sync:") +
+                                syncHeaderBytes("STAT", static_cast<uint32_t>(resolvedPath.size())) +
+                                resolvedPath;
+    CHECK_STR_EQ(statWritten, expectedStat);
+    CHECK_EQ(factory.callCount(), 2);
+}
+
+TEST(SymlinkSuite, symlinkToRegularFileStaysAFile) {
+    std::string listScript = "OKAY" "OKAY" +
+                              encodeDent(0120777, 11, 1600000000, "link") +
+                              encodeListDone();
+    std::string statScript = std::string("OKAY" "OKAY") + "STAT" +
+                              encodeStatBody(0100644, 4096, 1600000009);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(listScript, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::vector<FindResult> entries;
+    std::string warning;
+    std::string error;
+    CHECK(core.listDirectory("/SERIAL1/sdcard", &entries, &warning, &error));
+
+    CHECK_EQ(entries.size(), static_cast<size_t>(1));
+    CHECK_STR_EQ(entries[0].name, "link");
+    CHECK(!entries[0].isDir);
+}
+
+TEST(SymlinkSuite, brokenSymlinkStaysAFileAndDoesNotFailTheListing) {
+    std::string listScript = "OKAY" "OKAY" +
+                              encodeDent(0120777, 7, 1600000000, "dangling") +
+                              encodeListDone();
+    // All-zero STAT body: the sync protocol's "does not exist".
+    std::string statScript = std::string("OKAY" "OKAY") + "STAT" + encodeStatBody(0, 0, 0);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(listScript, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::vector<FindResult> entries;
+    std::string warning;
+    std::string error;
+    CHECK(core.listDirectory("/SERIAL1/sdcard", &entries, &warning, &error));
+
+    CHECK(error.empty());
+    CHECK_EQ(entries.size(), static_cast<size_t>(1));
+    CHECK(!entries[0].isDir);
+}
+
+TEST(SymlinkSuite, resolutionIsCachedWithTheListingAndNotRepeated) {
+    std::string listScript = "OKAY" "OKAY" +
+                              encodeDent(0120777, 21, 1600000000, "sdcard") +
+                              encodeListDone();
+    std::string statScript = std::string("OKAY" "OKAY") + "STAT" +
+                              encodeStatBody(0040771, 4096, 1600000009);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(listScript, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::vector<FindResult> first;
+    std::vector<FindResult> second;
+    std::string warning;
+    std::string error;
+    CHECK(core.listDirectory("/SERIAL1", &first, &warning, &error));
+    CHECK_EQ(factory.callCount(), 2);
+
+    CHECK(core.listDirectory("/SERIAL1", &second, &warning, &error));
+    CHECK_EQ(factory.callCount(), 2); // served from cache: no second STAT round trip
+    CHECK_EQ(second.size(), static_cast<size_t>(1));
+    CHECK(second[0].isDir);
+}
+
+TEST(SymlinkSuite, getFileSizesAndStampsFromTheSymlinkTargetNotTheLink) {
+    TestTempDir dir;
+    std::string localPath = dir.path() + "/downloaded.bin";
+    std::string content = "the target's real contents";
+    int64_t linkMtime = 1600000000;   // the link's own mtime -- must NOT be used
+    int64_t targetMtime = 1434894309; // 2015-06-21 13:45:09 UTC
+
+    // 1: STAT of the path itself -- adbd lstat()s it, so this is the LINK.
+    std::string statLink = std::string("OKAY" "OKAY") + "STAT" +
+                            encodeStatBody(0120777, 21, static_cast<uint32_t>(linkMtime));
+    // 2: STAT of "<path>/." -- resolves through the link to the target.
+    std::string statTarget = std::string("OKAY" "OKAY") + "STAT" +
+                              encodeStatBody(0100644, static_cast<uint32_t>(content.size()),
+                                             static_cast<uint32_t>(targetMtime));
+    // 3: RECV streams the TARGET's bytes.
+    std::string recvScript = std::string("OKAY" "OKAY") +
+                              syncHeaderBytes("DATA", static_cast<uint32_t>(content.size())) +
+                              content + syncHeaderBytes("DONE", 0);
+
+    QueueFactory factory;
+    std::string targetStatWritten;
+    factory.push(std::make_unique<RecordingTransport>(statLink, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(statTarget, &targetStatWritten, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(recvScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::vector<uint64_t> progressTotals;
+    ProgressFn progress = [&progressTotals](uint64_t, uint64_t total) -> bool {
+        progressTotals.push_back(total);
+        return true;
+    };
+
+    std::string error;
+    int result = core.getFile("/SERIAL1/sdcard/link.bin", localPath, FS_COPYFLAGS_OVERWRITE,
+                              progress, &error);
+
+    CHECK_EQ(result, FS_FILE_OK);
+    CHECK_STR_EQ(readFile(localPath), content);
+
+    // The mtime stamped locally is the TARGET's, never the link's.
+    struct stat st;
+    CHECK_EQ(::stat(localPath.c_str(), &st), 0);
+    CHECK_EQ(static_cast<int64_t>(st.st_mtime), targetMtime);
+
+    // ... and the progress total is the target's size, not the link's 21.
+    CHECK(!progressTotals.empty());
+    if (!progressTotals.empty()) {
+        CHECK_EQ(progressTotals[0], static_cast<uint64_t>(content.size()));
+    }
+
+    std::string resolvedPath = "/sdcard/link.bin/.";
+    std::string expectedStat = encodeHostRequest("host:transport:SERIAL1") +
+                                encodeHostRequest("sync:") +
+                                syncHeaderBytes("STAT", static_cast<uint32_t>(resolvedPath.size())) +
+                                resolvedPath;
+    CHECK_STR_EQ(targetStatWritten, expectedStat);
+}
+
+TEST(SymlinkSuite, getFileOnAPlainFileMakesNoExtraStatRoundTrip) {
+    TestTempDir dir;
+    std::string localPath = dir.path() + "/plain.bin";
+    std::string content = "ordinary";
+
+    std::string statScript = std::string("OKAY" "OKAY") + "STAT" +
+                              encodeStatBody(0100644, static_cast<uint32_t>(content.size()),
+                                             1600000000);
+    std::string recvScript = std::string("OKAY" "OKAY") +
+                              syncHeaderBytes("DATA", static_cast<uint32_t>(content.size())) +
+                              content + syncHeaderBytes("DONE", 0);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(recvScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    CHECK_EQ(core.getFile("/SERIAL1/sdcard/plain.bin", localPath, FS_COPYFLAGS_OVERWRITE,
+                          ProgressFn(), &error),
+             FS_FILE_OK);
+    CHECK_EQ(factory.callCount(), 2); // STAT + RECV only
 }
 
 TEST(ListDirectorySuite, secondCallHitsCacheAndMakesNoNewTransportCalls) {
@@ -1097,7 +1312,12 @@ TEST(ShellMutationSuite, setModificationTimeFallsBackToDashTFormWhenDashDFails) 
     int64_t mtime = 1000000000; // 2001-09-09 01:46:40 UTC
 
     std::string dCommand = "touch -c -d @" + std::to_string(mtime) + " " + shellQuote(path);
-    std::string tCommand = "touch -c -t 200109090146.40 " + shellQuote(path);
+    // TZ=UTC is load-bearing, not decoration: POSIX touch -t reads its
+    // argument in the SHELL's local time, and that shell is on the phone.
+    // formatTouchTArg formats in UTC (gmtime_r), so without the TZ
+    // assignment prefix the stamp lands off by the phone's UTC offset --
+    // on the one export this whole project exists to protect.
+    std::string tCommand = "TZ=UTC touch -c -t 200109090146.40 " + shellQuote(path);
 
     QueueFactory factory;
     std::string written1;

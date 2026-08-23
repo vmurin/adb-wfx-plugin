@@ -287,7 +287,10 @@ inline std::string tempDownloadPath(const std::string& localPath) {
 // when Android's toybox touch rejects "-d @<epoch>"; converting through
 // the *local* timezone here would silently shift every uploaded or
 // renamed date by the machine's UTC offset, which is exactly the class of
-// correctness bug this whole project exists to eliminate.
+// correctness bug this whole project exists to eliminate. The other half
+// of that agreement lives at the call site: touch -t reads its argument
+// in the *device's* local time, so setModificationTime prefixes the
+// command with TZ=UTC. Change one and you must change the other.
 //
 // Returns false (leaving *out untouched) when epochSeconds is out of
 // gmtime_r's representable range, rather than silently building a shell
@@ -344,6 +347,8 @@ public:
             return false;
         }
 
+        resolveSymlinkTargets(rp.serial, rp.path, &entries);
+
         cache_.put(wfxDir, entries);
         appendEntries(entries, out);
         return true;
@@ -395,6 +400,25 @@ public:
         }
         if (!exists) {
             return FS_FILE_NOTFOUND;
+        }
+
+        // The STAT above is adbd's lstat, so for a symlink it describes
+        // the LINK -- a 21-byte size and the link's own mtime -- while
+        // syncRecv below downloads the TARGET. Left uncorrected that
+        // makes the progress percentage meaningless and stamps the
+        // downloaded file with the link's date, which is exactly the
+        // class of silently-wrong mtime this project exists to
+        // eliminate. Re-stat through the link and use the target's
+        // numbers. Best-effort: a dangling link keeps the lstat values
+        // and syncRecv reports the real error.
+        if (remoteInfo.isSymlink()) {
+            DirEntry target;
+            bool targetExists = false;
+            AdbError targetErr =
+                client_.syncStat(rp.serial, throughSymlink(rp.path), &target, &targetExists);
+            if (targetErr.ok && targetExists) {
+                remoteInfo = target;
+            }
         }
 
         if (!(copyFlags & FS_COPYFLAGS_OVERWRITE) && plugincore_detail::localFileExists(localPath)) {
@@ -681,7 +705,13 @@ public:
             }
             return false;
         }
-        std::string tCommand = "touch -c -t " + tTimestamp + " " + quoted;
+        // TZ=UTC is not decoration. POSIX touch -t interprets its
+        // argument in the *shell's* local time, and that shell is on the
+        // phone -- so a phone set to UTC+3 would land every fallback
+        // stamp three hours off. formatTouchTArg deliberately formats in
+        // UTC (gmtime_r); this assignment prefix, which toybox's sh
+        // honours like any other, is what makes the two agree.
+        std::string tCommand = "TZ=UTC touch -c -t " + tTimestamp + " " + quoted;
         std::string tOutput;
         AdbError tErr = client_.shellCommand(rp.serial, tCommand, &tOutput);
         if (!tErr.ok) {
@@ -751,6 +781,44 @@ private:
         return true;
     }
 
+    // A path that lstat() resolves through a final symlink: POSIX
+    // requires a trailing "/." to be resolved as a directory reference,
+    // so lstat("/sdcard/.") reports the directory /sdcard points at
+    // rather than the link. This is how a sync-protocol client asks
+    // "what is on the other end of this link?" without a readlink
+    // primitive (there is none in sync v1).
+    static std::string throughSymlink(const std::string& path) {
+        return joinWfxPath(path, ".");
+    }
+
+    // adbd's do_list uses lstat, so on any modern Android device the
+    // device root comes back with sdcard, etc, d, vendor, bin, odm and
+    // product all reported as 0120777 symlinks -- and /sdcard, the single
+    // most common destination on the phone, renders as a 21-byte file
+    // that cannot be opened. Re-stat each symlink through a trailing "/."
+    // and record whether it points at a directory.
+    //
+    // Best-effort by construction: a stat that fails, or a link that
+    // dangles, simply leaves the entry classified as a non-directory --
+    // the listing itself must never fail because one link could not be
+    // resolved. The cost is bounded and paid where it matters: roughly
+    // fifteen links in "/", effectively none under /sdcard.
+    void resolveSymlinkTargets(const std::string& serial, const std::string& dirPath,
+                               std::vector<DirEntry>* entries) {
+        for (DirEntry& e : *entries) {
+            if (!e.isSymlink() || e.name == "." || e.name == "..") {
+                continue;
+            }
+            DirEntry target;
+            bool exists = false;
+            AdbError err = client_.syncStat(
+                serial, throughSymlink(joinWfxPath(dirPath, e.name)), &target, &exists);
+            if (err.ok && exists && target.isDir()) {
+                e.symlinkTargetIsDir = true;
+            }
+        }
+    }
+
     static void appendEntries(const std::vector<DirEntry>& entries, std::vector<FindResult>* out) {
         for (const DirEntry& e : entries) {
             if (e.name == "." || e.name == "..") {
@@ -761,7 +829,10 @@ private:
             r.size = e.size;
             r.mtime = e.mtime;
             r.unixMode = e.mode;
-            r.isDir = e.isDir(); // symlinks: isDir() is false, mode keeps the S_IFLNK bits
+            // A symlink to a directory is navigable as one (see
+            // resolveSymlinkTargets); unixMode still carries the link's
+            // own S_IFLNK bits so DC shows what it really is.
+            r.isDir = e.isNavigableDir();
             out->push_back(std::move(r));
         }
     }

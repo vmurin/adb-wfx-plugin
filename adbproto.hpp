@@ -25,12 +25,30 @@ struct DirEntry {
     uint64_t size = 0;
     int64_t mtime = 0;
 
+    // Not a wire field. adbd's do_list and do_stat both use lstat, so
+    // `mode` always describes the link itself and never what it points
+    // at -- which is why /sdcard, /etc, /d, /vendor and friends all
+    // arrive with mode 0120777. A caller that has resolved the target
+    // (PluginCore does, by re-stat'ing the path with a trailing "/.")
+    // records the answer here; it stays false for everything else,
+    // including an unresolved or broken link.
+    bool symlinkTargetIsDir = false;
+
     bool isDir() const {
         return (mode & POSIX_MODE_TYPE_MASK) == POSIX_MODE_DIRECTORY;
     }
 
     bool isSymlink() const {
         return (mode & POSIX_MODE_TYPE_MASK) == POSIX_MODE_SYMLINK;
+    }
+
+    // "Can a file manager open this entry as a directory?" -- true for a
+    // real directory, and for a symlink whose target has been resolved to
+    // one. Distinct from isDir(), which answers the narrower "is the
+    // lstat'ed entry itself a directory": symlinks are still never
+    // *followed* for transfer purposes, only classified for navigation.
+    bool isNavigableDir() const {
+        return isDir() || (isSymlink() && symlinkTargetIsDir);
     }
 };
 

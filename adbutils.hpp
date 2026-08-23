@@ -48,7 +48,10 @@ inline RemotePath parseRemotePath(const std::string& wfxPath) {
     return result;
 }
 
-// Joins a WFX directory path and a leaf name into a WFX path.
+// Joins a directory path and a leaf name. WFX paths and on-device
+// absolute paths share the same '/'-separated shape, so this serves both
+// (PluginCore uses it for the on-device side when building a symlink's
+// "<path>/." resolution target).
 inline std::string joinWfxPath(const std::string& dir, const std::string& leaf) {
     if (!dir.empty() && dir.back() == '/') {
         return dir + leaf;
