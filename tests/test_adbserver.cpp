@@ -187,3 +187,17 @@ TEST(FindAdbBinarySuite, adbPathPreferredWhenExecutable) {
 TEST(StartAdbServerSuite, nonexistentBinaryReturnsFalse) {
     CHECK(!startAdbServer("/nonexistent/adb"));
 }
+
+// startAdbServer always execs "<adb> start-server", so there's no real
+// binary we can point it at without touching the no-real-adb rule. These
+// two exercise the waitpid/exit-status half of the function (unreached by
+// the nonexistent-binary case, which fails at posix_spawn) using ordinary
+// system binaries purely as stand-ins for "a process that exits 0" and
+// "a process that exits nonzero" -- no adb server is started or implied.
+TEST(StartAdbServerSuite, childExitingZeroReturnsTrue) {
+    CHECK(startAdbServer("/usr/bin/true"));
+}
+
+TEST(StartAdbServerSuite, childExitingNonZeroReturnsFalse) {
+    CHECK(!startAdbServer("/usr/bin/false"));
+}

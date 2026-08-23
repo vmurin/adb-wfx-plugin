@@ -9,6 +9,7 @@
 
 #include "adbproto.hpp"
 
+#include <cerrno>
 #include <cstdlib>
 #include <functional>
 #include <spawn.h>
@@ -141,8 +142,13 @@ inline bool startAdbServer(const std::string& adbBinary) {
     }
 
     int status = 0;
-    if (waitpid(pid, &status, 0) < 0) {
-        return false;
+    while (waitpid(pid, &status, 0) < 0) {
+        // A signal delivered to this (long-lived GUI) process must not
+        // leave the already-spawned child unreaped as a zombie -- retry
+        // on EINTR specifically, give up on any other error.
+        if (errno != EINTR) {
+            return false;
+        }
     }
 
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
