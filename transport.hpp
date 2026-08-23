@@ -35,7 +35,10 @@ using RawTransferFn = std::function<ptrdiff_t(size_t offset, size_t remaining)>;
 // been moved in total, looping over partial transfers and retrying a
 // transfer that failed with EINTR. Stops and returns false on any other
 // error, or on a 0-byte result (EOF / peer closed) before n bytes are
-// done.
+// done. (readExactly's `rawTransfer` calls readSome, which already retries
+// EINTR itself via retryOnEintr below -- so on that path this EINTR branch
+// is never actually taken; it stays live and tested here because
+// writeAll's `rawTransfer`, a raw send(), does not retry on its own.)
 inline bool loopTransfer(const RawTransferFn& rawTransfer, size_t n) {
     size_t done = 0;
     while (done < n) {
@@ -54,6 +57,26 @@ inline bool loopTransfer(const RawTransferFn& rawTransfer, size_t n) {
     return true;
 }
 
+// One raw single-shot attempt, with recv()/send() semantics: returns
+// bytes transferred, 0 for EOF, or -1 with errno set (including EINTR).
+using RawAttemptFn = std::function<ptrdiff_t()>;
+
+// Retries `rawAttempt` while it fails with EINTR, returning its first
+// non-EINTR result (success, EOF, or a real error) unchanged. This is the
+// seam TcpTransport::readSome uses to hide a transient signal interruption
+// from every caller -- not only from readExactly's loop above, since
+// readSome is also called directly by streaming code (e.g. AdbClient
+// reading sync DATA chunks or draining shell: output).
+inline ptrdiff_t retryOnEintr(const RawAttemptFn& rawAttempt) {
+    for (;;) {
+        ptrdiff_t result = rawAttempt();
+        if (result < 0 && errno == EINTR) {
+            continue;
+        }
+        return result;
+    }
+}
+
 } // namespace transport_detail
 
 class Transport {
@@ -69,11 +92,9 @@ public:
     // EINTR. Returns false on EOF or error before n bytes were read.
     virtual bool readExactly(void* buf, size_t n) = 0;
 
-    // Reads up to n bytes in a single underlying call. Returns the number
-    // of bytes read, 0 on EOF, -1 on error (including EINTR -- readSome
-    // itself does not retry; that guarantee belongs to writeAll and
-    // readExactly, via their shared retry loop,
-    // transport_detail::loopTransfer).
+    // Reads up to n bytes in a single underlying call, transparently
+    // retrying on EINTR. Returns the number of bytes read, 0 on EOF, -1 on
+    // a real error.
     virtual ptrdiff_t readSome(void* buf, size_t n) = 0;
 
     virtual void close() = 0;
@@ -169,14 +190,13 @@ public:
     }
 
     ptrdiff_t readSome(void* buf, size_t n) override {
-        ssize_t result = ::recv(fd_, buf, n, 0);
+        ptrdiff_t result = transport_detail::retryOnEintr([this, buf, n]() -> ptrdiff_t {
+            return static_cast<ptrdiff_t>(::recv(fd_, buf, n, 0));
+        });
         if (result < 0) {
-            if (errno != EINTR) {
-                setErrnoMessage(&lastError_, "read");
-            }
-            return -1;
+            setErrnoMessage(&lastError_, "read");
         }
-        return static_cast<ptrdiff_t>(result);
+        return result;
     }
 
     void close() override {

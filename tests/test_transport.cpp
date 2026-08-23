@@ -186,6 +186,57 @@ TEST(LoopTransferSuite, zeroResultStopsTheLoop) {
 }
 
 // ---------------------------------------------------------------------
+// transport_detail::retryOnEintr -- the seam TcpTransport::readSome uses to
+// hide a transient EINTR from every caller, not just readExactly (Task 7's
+// AdbClient calls readSome directly to stream sync DATA chunks and drain
+// shell: output, so a bare EINTR must never surface to it as a hard -1).
+// ---------------------------------------------------------------------
+
+TEST(RetryOnEintrSuite, retriesOnEintrThenReturnsTheRealResult) {
+    int callCount = 0;
+    auto raw = [&]() -> ptrdiff_t {
+        ++callCount;
+        if (callCount == 1) {
+            errno = EINTR;
+            return -1;
+        }
+        return 7;
+    };
+
+    ptrdiff_t result = transport_detail::retryOnEintr(raw);
+
+    CHECK_EQ(result, 7);
+    CHECK_EQ(callCount, 2);
+}
+
+TEST(RetryOnEintrSuite, passesThroughANonEintrErrorWithoutRetrying) {
+    int callCount = 0;
+    auto raw = [&]() -> ptrdiff_t {
+        ++callCount;
+        errno = EIO;
+        return -1;
+    };
+
+    ptrdiff_t result = transport_detail::retryOnEintr(raw);
+
+    CHECK_EQ(result, -1);
+    CHECK_EQ(callCount, 1);
+}
+
+TEST(RetryOnEintrSuite, passesThroughEofWithoutRetrying) {
+    int callCount = 0;
+    auto raw = [&]() -> ptrdiff_t {
+        ++callCount;
+        return 0;
+    };
+
+    ptrdiff_t result = transport_detail::retryOnEintr(raw);
+
+    CHECK_EQ(result, 0);
+    CHECK_EQ(callCount, 1);
+}
+
+// ---------------------------------------------------------------------
 // TcpTransport
 // ---------------------------------------------------------------------
 
@@ -312,6 +363,33 @@ TEST(TcpTransportSuite, writeAfterPeerClosesFailsWithoutKillingProcess) {
     // this assertion would never run -- reaching it at all is part of the
     // proof.
     CHECK(sawFailure);
+    CHECK(!transport->lastError().empty());
+}
+
+TEST(TcpTransportSuite, readSomeSetsLastErrorOnARealErrorPath) {
+    int port = 0;
+    int listenFd = startListener(&port);
+
+    std::thread server([listenFd]() {
+        int connFd = ::accept(listenFd, nullptr, nullptr);
+        ::close(connFd);
+    });
+
+    std::string error;
+    std::unique_ptr<TcpTransport> transport = TcpTransport::connectTo("127.0.0.1", port, &error);
+    CHECK(transport != nullptr);
+
+    server.join();
+    ::close(listenFd);
+
+    // Force a real, non-EINTR error out of readSome: closing the transport
+    // drops fd_ to -1, so the next recv() fails with EBADF. Proves
+    // lastError() is never left stale on a path that returns -1.
+    transport->close();
+    char buf[1];
+    ptrdiff_t result = transport->readSome(buf, sizeof(buf));
+
+    CHECK_EQ(result, -1);
     CHECK(!transport->lastError().empty());
 }
 
