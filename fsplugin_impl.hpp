@@ -156,7 +156,7 @@ inline void reportWarning(tRequestProcW requestProc, int pluginNr, const std::st
 // produces (a cross-device move, a device's shell stderr, a transport
 // error, ...). Without this, every one of those reasons went nowhere and
 // the user saw only Double Commander's generic "cannot copy/delete/
-// rename" (see task-9 review round 1). A null logProc or an empty
+// rename". A null logProc or an empty
 // message are both silent no-ops.
 inline void reportError(tLogProcW logProc, int pluginNr, const std::string& message) {
     if (message.empty() || logProc == nullptr) {
@@ -220,7 +220,7 @@ inline bool isWriteOperation(int operation) {
 // returns time_t 0 indistinguishably from a genuine Unix-epoch mtime, and
 // FsSetTimeW would stamp the file 1970-01-01 whenever LastWriteTime comes
 // in null or zeroed: silently wrong dates from the very export that
-// exists to protect them (see task-9 review round 1). A null pointer
+// exists to protect them. A null pointer
 // counts as unset too, so callers don't need a separate null check.
 inline bool isUnsetFileTime(const FILETIME* ft) {
     return ft == nullptr || (ft->dwLowDateTime == 0 && ft->dwHighDateTime == 0);
@@ -666,9 +666,9 @@ public:
             // "mv -n" against an existing target exits 0 and prints
             // nothing on this shell -- indistinguishable, via
             // runMutatingShellCommand-style "empty output means success"
-            // logic, from a rename that actually happened (see task-9
-            // review round 1). This transport gives no exit status to
-            // lean on, so the only reliable way to honor "don't
+            // logic, from a rename that actually happened. This
+            // transport gives no exit status to lean on, so the only
+            // reliable way to honor "don't
             // overwrite" is to check first and never send -n at all.
             DirEntry targetInfo;
             bool targetAlreadyExists = false;

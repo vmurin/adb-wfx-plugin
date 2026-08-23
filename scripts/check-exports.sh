@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Asserts, via `nm -gU`, that fsplugin.wfx64 exports every symbol Double
-# Commander needs (task-9-brief.md's export table). Builds the plugin
+# Commander needs. Builds the plugin
 # first if it isn't there yet, so this also works on a clean checkout.
 set -euo pipefail
 
@@ -48,7 +48,7 @@ fi
 # in BOTH directions, on Assigned(FsSetTime) or Assigned(FsSetTimeW), and
 # silently strips caoCopyTime from every copy operation when neither is
 # exported -- losing dates even on downloads, where this plugin plays no
-# part in setting them. See task-9-brief.md.
+# part in setting them.
 if ! grep -qx "_FsSetTimeW" <<< "$actual"; then
     echo "check-exports.sh FAILED: FsSetTimeW is not exported." >&2
     echo "Double Commander will silently stop copying file dates in both directions." >&2

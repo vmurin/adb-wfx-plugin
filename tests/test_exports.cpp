@@ -1,7 +1,7 @@
 // Proves fsplugin.wfx64 is a real, loadable WFX plugin exporting every
 // symbol Double Commander needs -- dlopen()ing the actual built artifact
 // and dlsym()ing each export, not merely calling the functions as C++
-// from this translation unit. See task-9-brief.md.
+// from this translation unit.
 //
 // Skips (prints SKIP, does not fail) when fsplugin.wfx64 has not been
 // built yet, so this test compiles and passes on a clean checkout even

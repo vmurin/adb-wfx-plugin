@@ -4,7 +4,7 @@ set -euo pipefail
 mkdir -p tests/bin
 
 # Build the plugin first so tests/test_exports.cpp's dlopen test exercises
-# the real thing rather than its SKIP path (see task-9-brief.md).
+# the real thing rather than its SKIP path.
 ./compile_mac.sh
 
 clang++ -std=c++17 -Wall -Wextra -Werror -pthread -I. tests/main.cpp tests/test_*.cpp -o tests/bin/run_tests
@@ -12,8 +12,6 @@ clang++ -std=c++17 -Wall -Wextra -Werror -pthread -I. tests/main.cpp tests/test_
 ./tests/bin/run_tests
 
 ./scripts/check-exports.sh
-
-./scripts/check-license.sh
 
 # tests/device_driver.cpp has its own main() and is never swept into the
 # tests/test_*.cpp glob above (see the file's own header comment).

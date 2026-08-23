@@ -48,7 +48,7 @@
 // of the exports Double Commander actually calls is marked with this
 // attribute to opt back in; scripts/check-exports.sh and
 // tests/test_exports.cpp both verify the result names exactly the 14
-// exports in task-9-brief.md's table, nothing else (previously, an
+// exports Double Commander requires, nothing else (previously, an
 // un-hidden libc++ internal symbol showed up alongside them in
 // `nm -gU`).
 #if defined(__GNUC__) || defined(__clang__)
@@ -245,7 +245,7 @@ WFX_EXPORT int DCPCALL FsRenMovFileW(WCHAR* oldName, WCHAR* newName, BOOL move, 
         // FS_FILE_WRITEERROR instead: retrying the identical operation as
         // a download+upload+delete would not fix a genuine error, and for
         // a multi-gigabyte file wastes minutes attributing the failure to
-        // the wrong step (see task-9 review rounds 1-2).
+        // the wrong step.
         if (targetExists) {
             return FS_FILE_EXISTS;
         }
