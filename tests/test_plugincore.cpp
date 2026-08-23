@@ -11,6 +11,7 @@
 #include "testing.hpp"
 
 #include <array>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -308,6 +309,113 @@ TEST(DisplayNameSuite, roundTripWithoutModel) {
 
 TEST(DisplayNameSuite, serialFromDisplayNameExactCaseFromBrief) {
     CHECK_STR_EQ(PluginCore::serialFromDisplayName("Pixel_7 (27281FDH2008DM)"), "27281FDH2008DM");
+}
+
+// ---------------------------------------------------------------------
+// Every operation must resolve a "<model> (<serial>)" WFX path component
+// back to the bare serial before talking to AdbClient -- listDirectory("/")
+// is exactly what names root entries that way, so every other method has
+// to undo it or no device with a known model could ever be opened. One
+// test per operation family (list, get, put, one shell mutation) drives a
+// display-name path all the way through and checks the literal
+// host:transport:<serial> bytes sent -- not the serial PluginCore was
+// merely given, but the one it actually put on the wire.
+// ---------------------------------------------------------------------
+
+TEST(DisplayNamePathSuite, listDirectoryResolvesDisplayNameToSerial) {
+    std::string serial = "27281FDH2008DM";
+    std::string displayPath = "/Pixel_7 (" + serial + ")/sdcard";
+    std::string devicePath = "/sdcard";
+
+    std::string script = "OKAY" "OKAY" + encodeDent(0100644, 10, 1600000000, "a.txt") +
+                          encodeListDone();
+    std::string written;
+    auto transport = std::make_unique<RecordingTransport>(script, &written, nullptr);
+    AdbClient client(singleUseFactory(std::move(transport)));
+    PluginCore core(client);
+
+    std::vector<FindResult> entries;
+    std::string warning;
+    std::string error;
+    CHECK(core.listDirectory(displayPath, &entries, &warning, &error));
+    CHECK(error.empty());
+
+    std::string expectedWritten = encodeHostRequest("host:transport:" + serial) +
+                                   encodeHostRequest("sync:") +
+                                   syncHeaderBytes("LIST", static_cast<uint32_t>(devicePath.size())) +
+                                   devicePath;
+    CHECK_STR_EQ(written, expectedWritten);
+}
+
+TEST(DisplayNamePathSuite, getFileResolvesDisplayNameToSerial) {
+    std::string serial = "27281FDH2008DM";
+    TestTempDir dir;
+    std::string localPath = dir.path() + "/photo.jpg";
+    std::string content = "abc";
+
+    std::string statScript = "OKAY" "OKAY" "STAT" +
+        encodeStatBody(0100644, static_cast<uint32_t>(content.size()), 1600000000);
+    std::string recvScript = "OKAY" "OKAY" +
+        syncHeaderBytes("DATA", static_cast<uint32_t>(content.size())) + content +
+        syncHeaderBytes("DONE", 0);
+
+    QueueFactory factory;
+    std::string statWritten;
+    std::string recvWritten;
+    factory.push(std::make_unique<RecordingTransport>(statScript, &statWritten, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(recvScript, &recvWritten, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    ProgressFn progress = [](uint64_t, uint64_t) { return true; };
+    std::string error;
+    int result = core.getFile("/Pixel_7 (" + serial + ")/sdcard/photo.jpg", localPath, 0, progress,
+                               &error);
+
+    CHECK_EQ(result, FS_FILE_OK);
+    std::string expectedTransportRequest = encodeHostRequest("host:transport:" + serial);
+    CHECK_EQ(statWritten.compare(0, expectedTransportRequest.size(), expectedTransportRequest), 0);
+    CHECK_EQ(recvWritten.compare(0, expectedTransportRequest.size(), expectedTransportRequest), 0);
+}
+
+TEST(DisplayNamePathSuite, putFileResolvesDisplayNameToSerial) {
+    std::string serial = "27281FDH2008DM";
+    TestTempDir dir;
+    std::string localPath = dir.path() + "/upload.bin";
+    writeFile(localPath, "xyz");
+
+    std::string script = "OKAY" "OKAY" + syncHeaderBytes("OKAY", 0);
+    std::string written;
+    auto transport = std::make_unique<RecordingTransport>(script, &written, nullptr);
+    AdbClient client(singleUseFactory(std::move(transport)));
+    PluginCore core(client);
+
+    ProgressFn progress = [](uint64_t, uint64_t) { return true; };
+    std::string error;
+    int result = core.putFile(localPath, "/Pixel_7 (" + serial + ")/sdcard/upload.bin",
+                               FS_COPYFLAGS_OVERWRITE, progress, &error);
+
+    CHECK_EQ(result, FS_FILE_OK);
+    std::string expectedTransportRequest = encodeHostRequest("host:transport:" + serial);
+    CHECK_EQ(written.compare(0, expectedTransportRequest.size(), expectedTransportRequest), 0);
+}
+
+TEST(DisplayNamePathSuite, deleteFileResolvesDisplayNameToSerial) {
+    std::string serial = "27281FDH2008DM";
+    std::string wfxPath = "/Pixel_7 (" + serial + ")/sdcard/DCIM/a.jpg";
+    std::string command = "rm -f " + shellQuote("/sdcard/DCIM/a.jpg");
+
+    std::string written;
+    auto transport = std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), &written, nullptr);
+    AdbClient client(singleUseFactory(std::move(transport)));
+    PluginCore core(client);
+
+    std::string error;
+    CHECK(core.deleteFile(wfxPath, &error));
+
+    std::string expectedWritten =
+        encodeHostRequest("host:transport:" + serial) + encodeHostRequest("shell:" + command);
+    CHECK_STR_EQ(written, expectedWritten);
 }
 
 // ---------------------------------------------------------------------
@@ -627,6 +735,43 @@ TEST(PutFileSuite, moveFlagDeletesLocalFileAfterSuccessfulUpload) {
     CHECK_EQ(dir.entryCount(), static_cast<size_t>(0)); // local file removed after the move
 }
 
+TEST(PutFileSuite, cancelledUploadInvalidatesCache) {
+    std::string listScript = "OKAY" "OKAY" + encodeDent(0100644, 10, 1600000000, "existing.txt") +
+                              encodeListDone();
+
+    TestTempDir dir;
+    std::string localPath = dir.path() + "/cancel_upload.bin";
+    writeFile(localPath, "some bytes to upload");
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(listScript, nullptr, nullptr));
+    // A cancelled syncSend never reads a final reply (see
+    // AdbClientSuite.syncSendCancellationStopsMidFileWithoutReportingSuccess
+    // in test_adbclient.cpp), so the handshake alone is all this needs.
+    factory.push(std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::vector<FindResult> entries;
+    std::string warning;
+    std::string error;
+    CHECK(core.listDirectory("/SERIAL1/sdcard", &entries, &warning, &error));
+    CHECK_EQ(factory.callCount(), 1);
+
+    ProgressFn progress = [](uint64_t, uint64_t) { return false; }; // cancel immediately
+    int result = core.putFile(localPath, "/SERIAL1/sdcard/cancel_upload.bin",
+                               FS_COPYFLAGS_OVERWRITE, progress, &error);
+    CHECK_EQ(result, FS_FILE_USERABORT);
+    CHECK_EQ(factory.callCount(), 2);
+
+    // A cancelled send may already have written a partial file remotely --
+    // the cache must not still be serving the pre-upload listing.
+    factory.push(std::make_unique<RecordingTransport>(listScript, nullptr, nullptr));
+    entries.clear();
+    CHECK(core.listDirectory("/SERIAL1/sdcard", &entries, &warning, &error));
+    CHECK_EQ(factory.callCount(), 3);
+}
+
 // ---------------------------------------------------------------------
 // deleteFile / removeDir / makeDir / renameOrMove / setModificationTime --
 // exact shell command strings, and error surfacing.
@@ -777,6 +922,29 @@ TEST(ShellMutationSuite, renameOrMoveNonEmptyOutputSurfacesErrorAndReturnsFalse)
     CHECK_STR_EQ(error, "mv: can't rename '/a': No such file or directory");
 }
 
+TEST(ShellMutationSuite, renameOrMoveAcrossDevicesIsRejectedWithoutWritingAnyBytes) {
+    // The sync/shell protocol is scoped to one host:transport: device at a
+    // time; a move from one device's WFX path to another's has no wire
+    // primitive to build on (that would need a download-then-upload,
+    // which is out of scope) and must be rejected outright -- never run
+    // silently on the wrong device.
+    bool factoryCalled = false;
+    TransportFactory factory = [&](std::string*) -> std::unique_ptr<Transport> {
+        factoryCalled = true;
+        return nullptr;
+    };
+    AdbClient client(factory);
+    PluginCore core(client);
+
+    std::string error;
+    bool ok = core.renameOrMove("/DEVICE_A/sdcard/a.jpg", "/DEVICE_B/sdcard/DCIM/a.jpg", true, true,
+                                 &error);
+
+    CHECK(!ok);
+    CHECK_STR_EQ(error, "cannot move between devices");
+    CHECK(!factoryCalled); // no shell command was ever attempted
+}
+
 TEST(ShellMutationSuite, setModificationTimeSendsExactQuotedTouchDCommand) {
     std::string serial = "SERIAL1";
     std::string path = std::string(TRICKY_REMOTE_PATH);
@@ -841,4 +1009,39 @@ TEST(ShellMutationSuite, setModificationTimeReturnsFalseWhenBothFormsFail) {
     std::string error;
     CHECK(!core.setModificationTime(wfxPath, 1000000000, &error));
     CHECK_STR_EQ(error, "touch: still no good");
+}
+
+// ---------------------------------------------------------------------
+// formatTouchTArg's out-of-range guard (gmtime_r returning nullptr)
+// ---------------------------------------------------------------------
+
+TEST(ShellMutationSuite, formatTouchTArgSucceedsForOrdinaryEpoch) {
+    std::string out = "unset";
+    bool ok = plugincore_detail::formatTouchTArg(1434894309, &out); // 2015-06-21 13:45:09 UTC
+    CHECK(ok);
+    CHECK_STR_EQ(out, "201506211345.09");
+}
+
+TEST(ShellMutationSuite, formatTouchTArgReturnsFalseForOutOfRangeEpochWithoutTouchingOut) {
+    std::string out = "unchanged";
+    bool ok = plugincore_detail::formatTouchTArg(INT64_MAX, &out);
+    CHECK(!ok);
+    CHECK_STR_EQ(out, "unchanged"); // left untouched on failure
+}
+
+TEST(ShellMutationSuite, setModificationTimeReturnsFalseWhenFallbackTimestampIsOutOfRange) {
+    std::string wfxPath = "/SERIAL1/sdcard/a.jpg";
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(
+        std::string("OKAY" "OKAY") + "touch: unrecognized option '-d'\n", nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    CHECK(!core.setModificationTime(wfxPath, INT64_MAX, &error));
+    CHECK(!error.empty());
+    // The -t fallback must never be attempted with a timestamp that can't
+    // be formatted -- no second transport was even requested.
+    CHECK_EQ(factory.callCount(), 1);
 }

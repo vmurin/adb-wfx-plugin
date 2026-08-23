@@ -98,14 +98,22 @@ inline std::string tempDownloadPath(const std::string& localPath) {
 // the *local* timezone here would silently shift every uploaded or
 // renamed date by the machine's UTC offset, which is exactly the class of
 // correctness bug this whole project exists to eliminate.
-inline std::string formatTouchTArg(int64_t epochSeconds) {
+//
+// Returns false (leaving *out untouched) when epochSeconds is out of
+// gmtime_r's representable range, rather than silently building a shell
+// command around whatever garbage a zero-initialized struct tm would
+// format as (e.g. "190001000000.00").
+inline bool formatTouchTArg(int64_t epochSeconds, std::string* out) {
     time_t t = static_cast<time_t>(epochSeconds);
     struct tm utc {};
-    ::gmtime_r(&t, &utc);
+    if (::gmtime_r(&t, &utc) == nullptr) {
+        return false;
+    }
     char buf[TOUCH_T_TIMESTAMP_BUFFER_SIZE];
     std::snprintf(buf, sizeof(buf), "%04d%02d%02d%02d%02d.%02d", utc.tm_year + 1900,
                   utc.tm_mon + 1, utc.tm_mday, utc.tm_hour, utc.tm_min, utc.tm_sec);
-    return std::string(buf);
+    *out = buf;
+    return true;
 }
 
 } // namespace plugincore_detail
@@ -127,7 +135,7 @@ public:
             error->clear();
         }
 
-        RemotePath rp = parseRemotePath(wfxDir);
+        RemotePath rp = parseWfxPath(wfxDir);
         if (rp.isRoot) {
             return listRootDevices(out, warning, error);
         }
@@ -184,7 +192,7 @@ public:
         if (error != nullptr) {
             error->clear();
         }
-        RemotePath rp = parseRemotePath(wfxRemote);
+        RemotePath rp = parseWfxPath(wfxRemote);
 
         DirEntry remoteInfo;
         bool exists = false;
@@ -247,9 +255,15 @@ public:
         times[1].tv_sec = static_cast<time_t>(remoteInfo.mtime);
         times[1].tv_nsec = 0;
         if (::utimensat(AT_FDCWD, localPath.c_str(), times, 0) != 0) {
+            // A file left behind with a silently-wrong mtime is exactly
+            // the class of defect this project exists to eliminate, and
+            // worse than a failed getFile leaving nothing behind: remove
+            // it so a failed copy cannot masquerade as a complete one.
+            std::string utimeError = std::strerror(errno);
+            ::unlink(localPath.c_str());
             if (error != nullptr) {
-                *error = std::string("downloaded but failed to set local modification time: ") +
-                         std::strerror(errno);
+                *error = "downloaded but failed to set local modification time, file removed: " +
+                         utimeError;
             }
             return FS_FILE_WRITEERROR;
         }
@@ -267,7 +281,7 @@ public:
         if (error != nullptr) {
             error->clear();
         }
-        RemotePath rp = parseRemotePath(wfxRemote);
+        RemotePath rp = parseWfxPath(wfxRemote);
 
         struct stat localStat;
         if (::stat(localPath.c_str(), &localStat) != 0) {
@@ -309,6 +323,11 @@ public:
 
         if (!sendErr.ok) {
             if (sendErr.message == ADB_CANCELLED) {
+                // A cancelled send may already have written a partial
+                // file remotely (syncSend only cancels between DATA
+                // chunks, never mid-chunk) -- drop any cached listing of
+                // its directory so it isn't hidden behind stale state.
+                invalidatePathAndParent(wfxRemote);
                 return FS_FILE_USERABORT;
             }
             if (error != nullptr) {
@@ -327,17 +346,17 @@ public:
     }
 
     bool deleteFile(const std::string& wfxRemote, std::string* error) {
-        RemotePath rp = parseRemotePath(wfxRemote);
+        RemotePath rp = parseWfxPath(wfxRemote);
         return runMutatingShellCommand(rp, "rm -f " + shellQuote(rp.path), wfxRemote, error);
     }
 
     bool removeDir(const std::string& wfxRemote, std::string* error) {
-        RemotePath rp = parseRemotePath(wfxRemote);
+        RemotePath rp = parseWfxPath(wfxRemote);
         return runMutatingShellCommand(rp, "rm -rf " + shellQuote(rp.path), wfxRemote, error);
     }
 
     bool makeDir(const std::string& wfxRemote, std::string* error) {
-        RemotePath rp = parseRemotePath(wfxRemote);
+        RemotePath rp = parseWfxPath(wfxRemote);
         return runMutatingShellCommand(rp, "mkdir -p " + shellQuote(rp.path), wfxRemote, error);
     }
 
@@ -352,8 +371,21 @@ public:
         if (error != nullptr) {
             error->clear();
         }
-        RemotePath rpFrom = parseRemotePath(wfxFrom);
-        RemotePath rpTo = parseRemotePath(wfxTo);
+        RemotePath rpFrom = parseWfxPath(wfxFrom);
+        RemotePath rpTo = parseWfxPath(wfxTo);
+
+        if (rpFrom.serial != rpTo.serial) {
+            // The sync/shell protocol is scoped to one host:transport:
+            // device at a time; there is no remote-to-remote copy
+            // primitive to build a cross-device move on top of (that
+            // would need a download-then-upload, which is out of scope
+            // here). Reject explicitly rather than silently running mv
+            // on the wrong device and reporting success.
+            if (error != nullptr) {
+                *error = "cannot move between devices";
+            }
+            return false;
+        }
 
         std::string command = "mv ";
         if (!overwrite) {
@@ -386,7 +418,7 @@ public:
         if (error != nullptr) {
             error->clear();
         }
-        RemotePath rp = parseRemotePath(wfxRemote);
+        RemotePath rp = parseWfxPath(wfxRemote);
         std::string quoted = shellQuote(rp.path);
 
         std::string epochCommand = "touch -c -d @" + std::to_string(mtime) + " " + quoted;
@@ -405,8 +437,14 @@ public:
 
         // Fallback: Android's toybox touch has historically rejected the
         // "-d @<epoch>" form.
-        std::string tCommand =
-            "touch -c -t " + plugincore_detail::formatTouchTArg(mtime) + " " + quoted;
+        std::string tTimestamp;
+        if (!plugincore_detail::formatTouchTArg(mtime, &tTimestamp)) {
+            if (error != nullptr) {
+                *error = "modification time is out of range";
+            }
+            return false;
+        }
+        std::string tCommand = "touch -c -t " + tTimestamp + " " + quoted;
         std::string tOutput;
         AdbError tErr = client_.shellCommand(rp.serial, tCommand, &tOutput);
         if (!tErr.ok) {
@@ -432,6 +470,20 @@ public:
     }
 
 private:
+    // parseRemotePath alone takes the WFX path's first component as the
+    // literal serial -- it has no idea about the "<model> (<serial>)"
+    // display names listDirectory("/") invents for the root entries. Every
+    // operation that turns a WFX path into a device to talk to MUST go
+    // through this instead of calling parseRemotePath directly, or a
+    // device with a known model can never be opened (host:transport:
+    // would be sent the display name, not the serial). A no-op for a bare
+    // serial, so nothing that already worked regresses.
+    static RemotePath parseWfxPath(const std::string& wfxPath) {
+        RemotePath rp = parseRemotePath(wfxPath);
+        rp.serial = serialFromDisplayName(rp.serial);
+        return rp;
+    }
+
     bool listRootDevices(std::vector<FindResult>* out, std::string* warning, std::string* error) {
         std::vector<DeviceInfo> devices;
         AdbError err = client_.listDevices(&devices);
