@@ -2,10 +2,14 @@
 // unit besides tests/*.cpp in this project (constraints.md #4).
 //
 // This file owns exactly: process-global state (the callbacks DC hands
-// FsInitW, the AdbClient/PluginCore pair, and the find-handle lifecycle),
-// UTF-16<->UTF-8 conversion at the SDK boundary (utils.hpp), and bridging
-// DC's progress/log/request callbacks to the plain C++ types PluginCore
-// and AdbClient use. Every actual decision -- device naming, caching, the
+// FsInitW and the AdbClient/PluginCore pair) and UTF-16<->UTF-8
+// conversion at the SDK boundary (utils.hpp). The find-handle lifecycle,
+// progress/warning/error callback bridging, and the write-operation
+// classification for FsStatusInfoW are all pure functions hoisted into
+// fsplugin_impl.hpp (FindHandle, advanceFindData, reportWarning,
+// reportError, makeProgressFn, isWriteOperation, isUnsetFileTime) so they
+// are directly testable; this file only supplies its globals as their
+// arguments. Every actual decision -- device naming, caching, the
 // download-to-temp-then-rename dance, mtime preservation, which shell
 // commands the mutating operations run -- lives in PluginCore
 // (fsplugin_impl.hpp, Task 8). If a change here starts to look like a
@@ -18,10 +22,10 @@
 //
 // Threading note: Double Commander can call a WFX plugin from more than
 // one thread (its background-transfer modes). Making this file's global
-// state thread-safe is out of scope for this task (see task-9-brief.md);
-// the globals below are kept to exactly the ones the brief lists, and
-// nothing here does anything to make concurrent use *more* broken than
-// the single AdbClient/PluginCore pair already implies.
+// state thread-safe is out of scope for this task; the globals below are
+// kept to exactly the ones FsInitW needs to hand out, and nothing here
+// does anything to make concurrent use *more* broken than the single
+// AdbClient/PluginCore pair already implies.
 #include "sdk.h"
 
 #include "adbclient.hpp"
@@ -38,6 +42,21 @@
 #include <unistd.h>
 #include <vector>
 
+// compile_mac.sh/compile_mac_universal.sh build with -fvisibility=hidden,
+// so every symbol is hidden from the shared library's export table by
+// default -- this file's own helper functions and globals included. Each
+// of the exports Double Commander actually calls is marked with this
+// attribute to opt back in; scripts/check-exports.sh and
+// tests/test_exports.cpp both verify the result names exactly the 14
+// exports in task-9-brief.md's table, nothing else (previously, an
+// un-hidden libc++ internal symbol showed up alongside them in
+// `nm -gU`).
+#if defined(__GNUC__) || defined(__clang__)
+#define WFX_EXPORT __attribute__((visibility("default")))
+#else
+#define WFX_EXPORT
+#endif
+
 namespace {
 
 // Host and port fsplugin.cpp's TransportFactory connects to. The port
@@ -46,22 +65,9 @@ namespace {
 // adbServerPort(); only the loopback host is fixed here.
 constexpr const char* ADB_SERVER_HOST = "127.0.0.1";
 
-// Title shown on the RT_MsgOK dialog FsFindFirstW raises for a
-// listDirectory warning (e.g. an unauthorized/offline device at the
-// root listing).
-constexpr const char* WARNING_DIALOG_TITLE = "ADB";
-
-// The value DC's SDK headers call FsGetDefRootName's result and the WFX
-// root path's first component after it: "ADB" everywhere a device serial
-// or model name isn't in play yet.
+// The value FsGetDefRootName copies out, and the WFX root path's first
+// component everywhere a device serial or model name isn't in play yet.
 constexpr const char* ROOT_NAME = "ADB";
-
-// wfxplugin.h/common.h (both vendored, never edited -- see
-// constraints.md #1) don't define these on a non-Windows build; define
-// them ourselves, guarded in case a future SDK header revision does.
-#ifndef INVALID_HANDLE_VALUE
-#define INVALID_HANDLE_VALUE ((HANDLE)(-1))
-#endif
 
 // -----------------------------------------------------------------
 // Process-global state (see the file comment above for the threading
@@ -76,90 +82,11 @@ tRequestProcW gRequestProcW = nullptr;
 std::unique_ptr<AdbClient> gAdbClient;
 std::unique_ptr<PluginCore> gPluginCore;
 
-// One FsFindFirstW/FsFindNextW/FsFindClose cycle's state: the full
-// listing (PluginCore::listDirectory has no notion of paging) plus how
-// far FsFindNextW has consumed it. Returned to DC as an opaque HANDLE.
-struct FindHandle {
-    std::vector<FindResult> entries;
-    size_t index = 0;
-};
-
-// Fills findData from the next entry in handle's listing that actually
-// fits a WIN32_FIND_DATAW (fillFindData, fsplugin_impl.hpp, skips one
-// whose name doesn't fit MAX_PATH rather than truncate it), advancing
-// handle->index past every entry it looks at. Returns false once the
-// listing is exhausted. Shared by FsFindFirstW and FsFindNextW so this
-// skip-and-advance logic exists in exactly one place.
-bool advanceFindData(FindHandle* handle, WIN32_FIND_DATAW* findData) {
-    while (handle->index < handle->entries.size()) {
-        const FindResult& entry = handle->entries[handle->index];
-        ++handle->index;
-        if (fillFindData(entry, findData)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// Raises warning (if non-empty) as an RT_MsgOK dialog via gRequestProcW --
-// used for listDirectory's *warning output (e.g. "device unauthorized",
-// see fsplugin_impl.hpp/PluginCore::listDirectory), which must reach the
-// user even when the rest of the listing came back fine.
-void reportWarning(const std::string& warning) {
-    if (warning.empty() || gRequestProcW == nullptr) {
-        return;
-    }
-    std::vector<WCHAR> title = utf8ToWide(WARNING_DIALOG_TITLE);
-    std::vector<WCHAR> text = utf8ToWide(warning);
-    WCHAR noReturnBuffer[1] = {0};
-    gRequestProcW(gPluginNr, RT_MsgOK, title.data(), text.data(), noReturnBuffer, 0);
-}
-
-// Bridges DC's tProgressProcW to the ProgressFn AdbClient/PluginCore
-// expect: sourceName/targetName are DC's own WCHAR* arguments to
-// FsGetFileW/FsPutFileW, valid for the lifetime of that call, so they are
-// captured by pointer rather than re-converted. A non-zero return from
-// gProgressProcW means "abort", which is why the result is inverted
-// before returning it as ProgressFn's "keep going" boolean.
-ProgressFn makeProgressFn(WCHAR* sourceName, WCHAR* targetName) {
-    return [sourceName, targetName](uint64_t done, uint64_t total) -> bool {
-        if (gProgressProcW == nullptr) {
-            return true;
-        }
-        int percent = computeTransferPercent(done, total);
-        int abortRequested = gProgressProcW(gPluginNr, sourceName, targetName, percent);
-        return abortRequested == 0;
-    };
-}
-
-// The FS_STATUS_OP_* values (sdk.h) that mutate the remote filesystem --
-// the operations after which a directory's cached listing (PluginCore's
-// ListingCache) can no longer be trusted. Read-only operations (LIST,
-// SEARCH, CALCSIZE, ...) are deliberately excluded: clearing the cache at
-// the start of every one of those would defeat the cache entirely, since
-// DC brackets a plain directory listing in FsStatusInfo(START, LIST) /
-// FsStatusInfo(END, LIST) too.
-bool isWriteOperation(int operation) {
-    switch (operation) {
-        case FS_STATUS_OP_PUT_SINGLE:
-        case FS_STATUS_OP_PUT_MULTI:
-        case FS_STATUS_OP_PUT_MULTI_THREAD:
-        case FS_STATUS_OP_RENMOV_SINGLE:
-        case FS_STATUS_OP_RENMOV_MULTI:
-        case FS_STATUS_OP_DELETE:
-        case FS_STATUS_OP_ATTRIB:
-        case FS_STATUS_OP_MKDIR:
-            return true;
-        default:
-            return false;
-    }
-}
-
 } // namespace
 
 extern "C" {
 
-int DCPCALL FsInitW(int pluginNr, tProgressProcW progressProc, tLogProcW logProc,
+WFX_EXPORT int DCPCALL FsInitW(int pluginNr, tProgressProcW progressProc, tLogProcW logProc,
                      tRequestProcW requestProc) {
     try {
         gPluginNr = pluginNr;
@@ -191,7 +118,7 @@ int DCPCALL FsInitW(int pluginNr, tProgressProcW progressProc, tLogProcW logProc
     }
 }
 
-HANDLE DCPCALL FsFindFirstW(WCHAR* path, WIN32_FIND_DATAW* findData) {
+WFX_EXPORT HANDLE DCPCALL FsFindFirstW(WCHAR* path, WIN32_FIND_DATAW* findData) {
     try {
         if (!gPluginCore) {
             return INVALID_HANDLE_VALUE;
@@ -203,10 +130,11 @@ HANDLE DCPCALL FsFindFirstW(WCHAR* path, WIN32_FIND_DATAW* findData) {
         std::string error;
         bool ok = gPluginCore->listDirectory(wfxDir, &handle->entries, &warning, &error);
         if (!ok) {
+            reportError(gLogProcW, gPluginNr, error);
             return INVALID_HANDLE_VALUE;
         }
 
-        reportWarning(warning);
+        reportWarning(gRequestProcW, gPluginNr, warning);
 
         if (!advanceFindData(handle.get(), findData)) {
             return INVALID_HANDLE_VALUE; // genuinely empty (or every entry was unfittable)
@@ -217,7 +145,7 @@ HANDLE DCPCALL FsFindFirstW(WCHAR* path, WIN32_FIND_DATAW* findData) {
     }
 }
 
-BOOL DCPCALL FsFindNextW(HANDLE hdl, WIN32_FIND_DATAW* findData) {
+WFX_EXPORT BOOL DCPCALL FsFindNextW(HANDLE hdl, WIN32_FIND_DATAW* findData) {
     try {
         if (hdl == nullptr || hdl == INVALID_HANDLE_VALUE) {
             return false;
@@ -229,7 +157,7 @@ BOOL DCPCALL FsFindNextW(HANDLE hdl, WIN32_FIND_DATAW* findData) {
     }
 }
 
-int DCPCALL FsFindClose(HANDLE hdl) {
+WFX_EXPORT int DCPCALL FsFindClose(HANDLE hdl) {
     try {
         if (hdl != nullptr && hdl != INVALID_HANDLE_VALUE) {
             delete static_cast<FindHandle*>(hdl);
@@ -241,7 +169,7 @@ int DCPCALL FsFindClose(HANDLE hdl) {
     return 0;
 }
 
-int DCPCALL FsGetFileW(WCHAR* remoteName, WCHAR* localName, int copyFlags, RemoteInfoStruct* ri) {
+WFX_EXPORT int DCPCALL FsGetFileW(WCHAR* remoteName, WCHAR* localName, int copyFlags, RemoteInfoStruct* ri) {
     try {
         (void)ri; // ri restates size/attributes DC already knows from FsFindFirstW; unused here
         if (!gPluginCore) {
@@ -250,14 +178,19 @@ int DCPCALL FsGetFileW(WCHAR* remoteName, WCHAR* localName, int copyFlags, Remot
         std::string wfxRemote = wideToUtf8(remoteName);
         std::string localPath = wideToUtf8(localName);
         std::string error;
-        return gPluginCore->getFile(wfxRemote, localPath, copyFlags,
-                                    makeProgressFn(remoteName, localName), &error);
+        int result = gPluginCore->getFile(
+            wfxRemote, localPath, copyFlags,
+            makeProgressFn(gProgressProcW, gPluginNr, remoteName, localName), &error);
+        if (result != FS_FILE_OK) {
+            reportError(gLogProcW, gPluginNr, error); // empty for USERABORT/EXISTS/NOTFOUND: no-op
+        }
+        return result;
     } catch (...) {
         return FS_FILE_READERROR;
     }
 }
 
-int DCPCALL FsPutFileW(WCHAR* localName, WCHAR* remoteName, int copyFlags) {
+WFX_EXPORT int DCPCALL FsPutFileW(WCHAR* localName, WCHAR* remoteName, int copyFlags) {
     try {
         if (!gPluginCore) {
             return FS_FILE_WRITEERROR;
@@ -265,69 +198,96 @@ int DCPCALL FsPutFileW(WCHAR* localName, WCHAR* remoteName, int copyFlags) {
         std::string localPath = wideToUtf8(localName);
         std::string wfxRemote = wideToUtf8(remoteName);
         std::string error;
-        return gPluginCore->putFile(localPath, wfxRemote, copyFlags,
-                                    makeProgressFn(localName, remoteName), &error);
+        int result = gPluginCore->putFile(
+            localPath, wfxRemote, copyFlags,
+            makeProgressFn(gProgressProcW, gPluginNr, localName, remoteName), &error);
+        if (result != FS_FILE_OK) {
+            reportError(gLogProcW, gPluginNr, error); // empty for USERABORT/EXISTS: no-op
+        }
+        return result;
     } catch (...) {
         return FS_FILE_WRITEERROR;
     }
 }
 
-int DCPCALL FsRenMovFileW(WCHAR* oldName, WCHAR* newName, BOOL move, BOOL overWrite,
+WFX_EXPORT int DCPCALL FsRenMovFileW(WCHAR* oldName, WCHAR* newName, BOOL move, BOOL overWrite,
                           RemoteInfoStruct* ri) {
     try {
         (void)ri;
         if (!gPluginCore) {
-            return FS_FILE_NOTSUPPORTED;
+            return FS_FILE_WRITEERROR;
         }
         std::string wfxFrom = wideToUtf8(oldName);
         std::string wfxTo = wideToUtf8(newName);
         std::string error;
-        bool ok = gPluginCore->renameOrMove(wfxFrom, wfxTo, move != 0, overWrite != 0, &error);
-        // renameOrMove/PluginCore reports failures as a bool + a free-text
-        // reason (cross-device move, a shell error, ...) rather than an
-        // FS_FILE_* taxonomy -- there is no finer-grained code to forward
-        // here, so any failure maps to FS_FILE_NOTSUPPORTED, telling DC to
-        // fall back to its own get+put+delete emulation.
-        return ok ? FS_FILE_OK : FS_FILE_NOTSUPPORTED;
+        bool crossDevice = false;
+        bool ok = gPluginCore->renameOrMove(wfxFrom, wfxTo, move != 0, overWrite != 0, &error,
+                                            &crossDevice);
+        if (ok) {
+            return FS_FILE_OK;
+        }
+        reportError(gLogProcW, gPluginNr, error);
+        // Only a cross-device rejection maps to FS_FILE_NOTSUPPORTED,
+        // telling DC to fall back to its own get+put+delete emulation --
+        // the one failure mode that fallback can actually fix. Every
+        // other failure (a refused overwrite, a shell error, a dropped
+        // transport) maps to FS_FILE_WRITEERROR instead: retrying the
+        // identical operation as a download+upload+delete would not fix
+        // a genuine error, and for a multi-gigabyte file wastes minutes
+        // attributing the failure to the wrong step (see task-9 review
+        // round 1).
+        return crossDevice ? FS_FILE_NOTSUPPORTED : FS_FILE_WRITEERROR;
     } catch (...) {
-        return FS_FILE_NOTSUPPORTED;
+        return FS_FILE_WRITEERROR;
     }
 }
 
-BOOL DCPCALL FsDeleteFileW(WCHAR* remoteName) {
+WFX_EXPORT BOOL DCPCALL FsDeleteFileW(WCHAR* remoteName) {
     try {
         if (!gPluginCore) {
             return false;
         }
         std::string wfxRemote = wideToUtf8(remoteName);
         std::string error;
-        return gPluginCore->deleteFile(wfxRemote, &error);
+        bool ok = gPluginCore->deleteFile(wfxRemote, &error);
+        if (!ok) {
+            reportError(gLogProcW, gPluginNr, error);
+        }
+        return ok;
     } catch (...) {
         return false;
     }
 }
 
-BOOL DCPCALL FsRemoveDirW(WCHAR* remoteName) {
+WFX_EXPORT BOOL DCPCALL FsRemoveDirW(WCHAR* remoteName) {
     try {
         if (!gPluginCore) {
             return false;
         }
         std::string wfxRemote = wideToUtf8(remoteName);
         std::string error;
-        return gPluginCore->removeDir(wfxRemote, &error);
+        bool ok = gPluginCore->removeDir(wfxRemote, &error);
+        if (!ok) {
+            reportError(gLogProcW, gPluginNr, error);
+        }
+        return ok;
     } catch (...) {
         return false;
     }
 }
 
-BOOL DCPCALL FsMkDirW(WCHAR* path) {
+WFX_EXPORT BOOL DCPCALL FsMkDirW(WCHAR* path) {
     try {
         if (!gPluginCore) {
             return false;
         }
         std::string wfxDir = wideToUtf8(path);
         std::string error;
-        return gPluginCore->makeDir(wfxDir, &error);
+        bool ok = gPluginCore->makeDir(wfxDir, &error);
+        if (!ok) {
+            reportError(gLogProcW, gPluginNr, error);
+        }
+        return ok;
     } catch (...) {
         return false;
     }
@@ -340,24 +300,31 @@ BOOL DCPCALL FsMkDirW(WCHAR* path) {
 // dates would be lost even when downloading, where this plugin plays no
 // part in setting them. Must always be present in the export table;
 // scripts/check-exports.sh checks for it by name.
-BOOL DCPCALL FsSetTimeW(WCHAR* remoteName, FILETIME* creationTime, FILETIME* lastAccessTime,
+WFX_EXPORT BOOL DCPCALL FsSetTimeW(WCHAR* remoteName, FILETIME* creationTime, FILETIME* lastAccessTime,
                         FILETIME* lastWriteTime) {
     try {
         (void)creationTime;   // ignored per the brief: only LastWriteTime is applied
         (void)lastAccessTime; // Android's toybox touch has no separate atime knob worth using
-        if (!gPluginCore || lastWriteTime == nullptr) {
+        if (!gPluginCore) {
             return false;
+        }
+        if (isUnsetFileTime(lastWriteTime)) {
+            return true; // nothing to set is not a failure
         }
         std::string wfxRemote = wideToUtf8(remoteName);
         time_t mtime = fileTimeToTime(*lastWriteTime);
         std::string error;
-        return gPluginCore->setModificationTime(wfxRemote, static_cast<int64_t>(mtime), &error);
+        bool ok = gPluginCore->setModificationTime(wfxRemote, static_cast<int64_t>(mtime), &error);
+        if (!ok) {
+            reportError(gLogProcW, gPluginNr, error);
+        }
+        return ok;
     } catch (...) {
         return false;
     }
 }
 
-void DCPCALL FsStatusInfoW(WCHAR* remoteDir, int infoStartEnd, int infoOperation) {
+WFX_EXPORT void DCPCALL FsStatusInfoW(WCHAR* remoteDir, int infoStartEnd, int infoOperation) {
     try {
         if (!gPluginCore) {
             return;
@@ -380,7 +347,7 @@ void DCPCALL FsStatusInfoW(WCHAR* remoteDir, int infoStartEnd, int infoOperation
     }
 }
 
-void DCPCALL FsGetDefRootName(char* defRootName, int maxlen) {
+WFX_EXPORT void DCPCALL FsGetDefRootName(char* defRootName, int maxlen) {
     try {
         if (defRootName == nullptr || maxlen <= 0) {
             return;
@@ -397,7 +364,7 @@ void DCPCALL FsGetDefRootName(char* defRootName, int maxlen) {
     }
 }
 
-BOOL DCPCALL FsDisconnectW(WCHAR* disconnectRoot) {
+WFX_EXPORT BOOL DCPCALL FsDisconnectW(WCHAR* disconnectRoot) {
     try {
         (void)disconnectRoot; // one shared cache for every device; nothing to key this on
         if (!gPluginCore) {

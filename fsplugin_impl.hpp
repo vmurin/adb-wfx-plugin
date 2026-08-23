@@ -46,7 +46,12 @@ struct FindResult {
 // translation units) means they have to live in a header to be testable
 // directly, without dlopen'ing the built plugin. They live here, next to
 // FindResult, rather than in a header of their own, because YAGNI: one
-// small pair of free functions doesn't earn a third header.
+// small set of free functions doesn't earn a third header.
+//
+// The ones that would otherwise read fsplugin.cpp's globals (the DC
+// callback pointers, the plugin number) take them as explicit parameters
+// instead, purely so they can be driven from a test with a fake callback
+// -- fsplugin.cpp itself just passes its globals at each call site.
 // ---------------------------------------------------------------------
 
 constexpr int TRANSFER_PERCENT_MIN = 0;
@@ -103,6 +108,123 @@ inline bool fillFindData(const FindResult& entry, WIN32_FIND_DATAW* findData) {
     findData->ftLastAccessTime = writeTime;
 
     return true;
+}
+
+// One FsFindFirstW/FsFindNextW/FsFindClose cycle's state: the full
+// listing (PluginCore::listDirectory has no notion of paging) plus how
+// far FsFindNextW has consumed it. fsplugin.cpp hands a FindHandle* to
+// Double Commander as an opaque HANDLE.
+struct FindHandle {
+    std::vector<FindResult> entries;
+    size_t index = 0;
+};
+
+// Fills findData from the next entry in handle's listing that actually
+// fits a WIN32_FIND_DATAW (fillFindData above skips one whose name
+// doesn't fit MAX_PATH rather than truncate it), advancing handle->index
+// past every entry it looks at -- including skipped ones, so a name that
+// doesn't fit can never be looked at twice. Returns false once the
+// listing is exhausted. Shared by FsFindFirstW and FsFindNextW so this
+// skip-and-advance logic exists in exactly one place.
+inline bool advanceFindData(FindHandle* handle, WIN32_FIND_DATAW* findData) {
+    while (handle->index < handle->entries.size()) {
+        const FindResult& entry = handle->entries[handle->index];
+        ++handle->index;
+        if (fillFindData(entry, findData)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Raises warning (if non-empty) as an RT_MsgOK dialog via requestProc --
+// used for listDirectory's *warning output (e.g. "device unauthorized",
+// see PluginCore::listDirectory above), which must reach the user even
+// when the rest of the listing came back fine. A null requestProc (DC
+// didn't supply one) or an empty warning are both silent no-ops.
+inline void reportWarning(tRequestProcW requestProc, int pluginNr, const std::string& warning) {
+    if (warning.empty() || requestProc == nullptr) {
+        return;
+    }
+    std::vector<WCHAR> title = utf8ToWide("ADB");
+    std::vector<WCHAR> text = utf8ToWide(warning);
+    WCHAR noReturnBuffer[1] = {0};
+    requestProc(pluginNr, RT_MsgOK, title.data(), text.data(), noReturnBuffer, 0);
+}
+
+// Raises message (if non-empty) via logProc as MSGTYPE_IMPORTANTERROR --
+// the shim's only channel for the free-text failure reasons PluginCore
+// produces (a cross-device move, a device's shell stderr, a transport
+// error, ...). Without this, every one of those reasons went nowhere and
+// the user saw only Double Commander's generic "cannot copy/delete/
+// rename" (see task-9 review round 1). A null logProc or an empty
+// message are both silent no-ops.
+inline void reportError(tLogProcW logProc, int pluginNr, const std::string& message) {
+    if (message.empty() || logProc == nullptr) {
+        return;
+    }
+    std::vector<WCHAR> wideMessage = utf8ToWide(message);
+    logProc(pluginNr, MSGTYPE_IMPORTANTERROR, wideMessage.data());
+}
+
+// Bridges DC's tProgressProcW to the ProgressFn AdbClient/PluginCore
+// expect: sourceName/targetName are DC's own WCHAR* arguments to
+// FsGetFileW/FsPutFileW, valid for the lifetime of that call, so they are
+// captured by pointer rather than re-converted. A non-zero return from
+// progressProc means "abort", which is why the result is inverted before
+// returning it as ProgressFn's "keep going" boolean. A null progressProc
+// (DC didn't supply one) always means "keep going".
+inline ProgressFn makeProgressFn(tProgressProcW progressProc, int pluginNr, WCHAR* sourceName,
+                                 WCHAR* targetName) {
+    return [progressProc, pluginNr, sourceName, targetName](uint64_t done, uint64_t total) -> bool {
+        if (progressProc == nullptr) {
+            return true;
+        }
+        int percent = computeTransferPercent(done, total);
+        int abortRequested = progressProc(pluginNr, sourceName, targetName, percent);
+        return abortRequested == 0;
+    };
+}
+
+// The FS_STATUS_OP_* values (sdk.h) that mutate the remote filesystem --
+// the operations after which a directory's cached listing (PluginCore's
+// ListingCache) can no longer be trusted. Read-only operations (LIST,
+// SEARCH, CALCSIZE, ...) are deliberately excluded: clearing the cache at
+// the start of every one of those would defeat the cache entirely, since
+// DC brackets a plain directory listing in FsStatusInfo(START, LIST) /
+// FsStatusInfo(END, LIST) too. tests/test_fsplugin_helpers.cpp enumerates
+// every FS_STATUS_OP_* constant against this function, so a future
+// mutating operation added to the SDK's vocabulary without a case here
+// fails loudly instead of silently serving a stale listing.
+inline bool isWriteOperation(int operation) {
+    switch (operation) {
+        case FS_STATUS_OP_PUT_SINGLE:
+        case FS_STATUS_OP_PUT_MULTI:
+        case FS_STATUS_OP_PUT_MULTI_THREAD:
+        case FS_STATUS_OP_RENMOV_SINGLE:
+        case FS_STATUS_OP_RENMOV_MULTI:
+        case FS_STATUS_OP_DELETE:
+        case FS_STATUS_OP_ATTRIB:
+        case FS_STATUS_OP_MKDIR:
+        case FS_STATUS_OP_SYNC_PUT:
+        case FS_STATUS_OP_SYNC_DELETE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// FsSetTimeW's shim-level guard: a zero-filled FILETIME (both fields 0)
+// means "not provided" in this SDK -- utils.hpp's fileTimeToTime treats
+// it the same way for the reverse direction ("a zero FILETIME means
+// unknown") -- not epoch 0. Without this check, fileTimeToTime(*ft)
+// returns time_t 0 indistinguishably from a genuine Unix-epoch mtime, and
+// FsSetTimeW would stamp the file 1970-01-01 whenever LastWriteTime comes
+// in null or zeroed: silently wrong dates from the very export that
+// exists to protect them (see task-9 review round 1). A null pointer
+// counts as unset too, so callers don't need a separate null check.
+inline bool isUnsetFileTime(const FILETIME* ft) {
+    return ft == nullptr || (ft->dwLowDateTime == 0 && ft->dwHighDateTime == 0);
 }
 
 namespace plugincore_detail {
@@ -428,8 +550,17 @@ public:
         return runMutatingShellCommand(rp, "mkdir -p " + shellQuote(rp.path), wfxRemote, error);
     }
 
+    // crossDevice, if non-null, is cleared at the start and set to true
+    // only for the specific failure "wfxFrom and wfxTo name different
+    // devices" -- the one failure mode where Double Commander's own
+    // copy+delete fallback (FS_FILE_NOTSUPPORTED, fsplugin.cpp) can
+    // actually succeed. Every other failure leaves it false: retrying the
+    // same operation as a download+upload+delete would not fix a genuine
+    // error (permission denied, a dropped transport, a refused overwrite),
+    // and for a multi-gigabyte file wastes minutes attributing the
+    // failure to the wrong step.
     bool renameOrMove(const std::string& wfxFrom, const std::string& wfxTo, bool move,
-                      bool overwrite, std::string* error) {
+                      bool overwrite, std::string* error, bool* crossDevice = nullptr) {
         // A same-directory rename and a cross-directory move both land on
         // the same "mv" against the device's single filesystem tree --
         // the distinction only matters to Double Commander's UI, never to
@@ -438,6 +569,9 @@ public:
 
         if (error != nullptr) {
             error->clear();
+        }
+        if (crossDevice != nullptr) {
+            *crossDevice = false;
         }
         RemotePath rpFrom = parseWfxPath(wfxFrom);
         RemotePath rpTo = parseWfxPath(wfxTo);
@@ -452,14 +586,38 @@ public:
             if (error != nullptr) {
                 *error = "cannot move between devices";
             }
+            if (crossDevice != nullptr) {
+                *crossDevice = true;
+            }
             return false;
         }
 
-        std::string command = "mv ";
         if (!overwrite) {
-            command += "-n ";
+            // "mv -n" against an existing target exits 0 and prints
+            // nothing on this shell -- indistinguishable, via
+            // runMutatingShellCommand-style "empty output means success"
+            // logic, from a rename that actually happened (see task-9
+            // review round 1). This transport gives no exit status to
+            // lean on, so the only reliable way to honor "don't
+            // overwrite" is to check first and never send -n at all.
+            DirEntry targetInfo;
+            bool targetExists = false;
+            AdbError statErr = client_.syncStat(rpTo.serial, rpTo.path, &targetInfo, &targetExists);
+            if (!statErr.ok) {
+                if (error != nullptr) {
+                    *error = statErr.message;
+                }
+                return false;
+            }
+            if (targetExists) {
+                if (error != nullptr) {
+                    *error = "target already exists";
+                }
+                return false;
+            }
         }
-        command += shellQuote(rpFrom.path) + " " + shellQuote(rpTo.path);
+
+        std::string command = "mv " + shellQuote(rpFrom.path) + " " + shellQuote(rpTo.path);
 
         std::string output;
         AdbError err = client_.shellCommand(rpFrom.serial, command, &output);

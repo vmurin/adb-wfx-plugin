@@ -889,25 +889,59 @@ TEST(ShellMutationSuite, renameOrMoveWithOverwriteSendsPlainMvCommand) {
     CHECK_STR_EQ(written, expectedWritten);
 }
 
-TEST(ShellMutationSuite, renameOrMoveWithoutOverwriteUsesMvDashN) {
+TEST(ShellMutationSuite, renameOrMoveWithoutOverwriteChecksTargetFirstThenSendsPlainMv) {
+    // Task 9 review round 1: "mv -n" against an existing target exits 0
+    // and prints nothing on this shell -- indistinguishable, via the
+    // "empty output means success" check, from a rename that actually
+    // happened. So a non-overwriting rename must stat the target first
+    // and never rely on -n at all; when the target does not exist, this
+    // becomes a plain "mv" (no -n) after that check passes.
     std::string serial = "SERIAL1";
     std::string fromPath = std::string(TRICKY_REMOTE_PATH);
     std::string toPath = "/sdcard/DCIM/renamed.jpg";
     std::string wfxFrom = "/" + serial + fromPath;
     std::string wfxTo = "/" + serial + toPath;
-    std::string command = "mv -n " + shellQuote(fromPath) + " " + shellQuote(toPath);
+    std::string command = "mv " + shellQuote(fromPath) + " " + shellQuote(toPath);
 
-    std::string written;
-    auto transport = std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), &written, nullptr);
-    AdbClient client(singleUseFactory(std::move(transport)));
+    std::string statScript = "OKAY" "OKAY" "STAT" + encodeStatBody(0, 0, 0); // target absent
+
+    std::string mvWritten;
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), &mvWritten, nullptr));
+    AdbClient client(factory.asFactory());
     PluginCore core(client);
 
     std::string error;
     CHECK(core.renameOrMove(wfxFrom, wfxTo, /*move=*/false, /*overwrite=*/false, &error));
+    CHECK_EQ(factory.callCount(), 2);
 
     std::string expectedWritten =
         encodeHostRequest("host:transport:" + serial) + encodeHostRequest("shell:" + command);
-    CHECK_STR_EQ(written, expectedWritten);
+    CHECK_STR_EQ(mvWritten, expectedWritten);
+}
+
+TEST(ShellMutationSuite, renameOrMoveWithoutOverwriteAndExistingTargetFailsWithoutRunningMv) {
+    // The regression this guards against: previously "mv -n" ran
+    // unconditionally and its empty, exit-0 output on a refused
+    // overwrite was reported as success, silently leaving the file at
+    // its old name. The existence check must catch this before any mv
+    // is ever attempted.
+    std::string wfxFrom = "/SERIAL1/sdcard/a.jpg";
+    std::string wfxTo = "/SERIAL1/sdcard/existing.jpg";
+    std::string statScript = "OKAY" "OKAY" "STAT" + encodeStatBody(0100644, 10, 1600000000); // exists
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    bool ok = core.renameOrMove(wfxFrom, wfxTo, /*move=*/false, /*overwrite=*/false, &error);
+
+    CHECK(!ok);
+    CHECK(!error.empty());
+    CHECK_EQ(factory.callCount(), 1); // mv must never have been attempted
 }
 
 TEST(ShellMutationSuite, renameOrMoveNonEmptyOutputSurfacesErrorAndReturnsFalse) {
@@ -943,6 +977,41 @@ TEST(ShellMutationSuite, renameOrMoveAcrossDevicesIsRejectedWithoutWritingAnyByt
     CHECK(!ok);
     CHECK_STR_EQ(error, "cannot move between devices");
     CHECK(!factoryCalled); // no shell command was ever attempted
+}
+
+TEST(ShellMutationSuite, renameOrMoveAcrossDevicesSetsCrossDeviceOutParam) {
+    // fsplugin.cpp (Task 9) needs to tell a cross-device rejection --
+    // where DC's own copy+delete fallback can actually succeed -- apart
+    // from every other failure, where retrying via that same fallback
+    // would just waste a full download+upload+delete on a doomed
+    // operation. crossDevice is that signal.
+    TransportFactory factory = [](std::string*) -> std::unique_ptr<Transport> {
+        return nullptr; // never reached: rejected before any transport is opened
+    };
+    AdbClient client(factory);
+    PluginCore core(client);
+
+    std::string error;
+    bool crossDevice = false;
+    bool ok = core.renameOrMove("/DEVICE_A/a", "/DEVICE_B/b", true, true, &error, &crossDevice);
+
+    CHECK(!ok);
+    CHECK(crossDevice);
+}
+
+TEST(ShellMutationSuite, renameOrMoveGenericFailureLeavesCrossDeviceFalse) {
+    std::string errorText = "mv: can't rename '/a': No such file or directory\n";
+    std::string script = "OKAY" "OKAY" + errorText;
+    auto transport = std::make_unique<RecordingTransport>(script, nullptr, nullptr);
+    AdbClient client(singleUseFactory(std::move(transport)));
+    PluginCore core(client);
+
+    std::string error;
+    bool crossDevice = true; // deliberately pre-set to the wrong value
+    bool ok = core.renameOrMove("/SERIAL1/a", "/SERIAL1/b", true, true, &error, &crossDevice);
+
+    CHECK(!ok);
+    CHECK(!crossDevice);
 }
 
 TEST(ShellMutationSuite, setModificationTimeSendsExactQuotedTouchDCommand) {
