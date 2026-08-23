@@ -48,6 +48,49 @@ private:
     bool* closedOut_;
 };
 
+// A FakeTransport that stalls before handing over its scripted bytes --
+// the double for a phone that goes to sleep mid-transfer. Each of the
+// first `stalls` readSome calls consults the stall callback AdbClient
+// installed (Transport::setStallCallback) exactly as TcpTransport does
+// when SO_RCVTIMEO fires: if it says keep waiting, the read proceeds; if
+// it says stop, the read fails with a timeout errno, which is what a
+// real cancelled stall looks like from the caller's side.
+class StallingTransport : public FakeTransport {
+public:
+    // stallPollsOut, like RecordingTransport's outputs above, is written
+    // on destruction: AdbClient destroys the transport before returning,
+    // so a test cannot read anything off the object itself afterwards.
+    StallingTransport(const std::string& scriptedReplies, int stalls, int* stallPollsOut)
+        : FakeTransport(scriptedReplies), stallsLeft_(stalls), stallPollsOut_(stallPollsOut) {}
+
+    ~StallingTransport() override {
+        if (stallPollsOut_ != nullptr) {
+            *stallPollsOut_ = stallPolls_;
+        }
+    }
+
+    ptrdiff_t readSome(void* buf, size_t n) override {
+        // Only stalls once a stall callback is installed, i.e. once the
+        // host:transport:/sync: handshake is done and the transfer proper
+        // has begun -- which is the only window AdbClient arms it for.
+        const StallFn& onStall = stallCallback();
+        if (stallsLeft_ > 0 && onStall) {
+            --stallsLeft_;
+            ++stallPolls_;
+            if (!onStall()) {
+                errno = EAGAIN;
+                return -1;
+            }
+        }
+        return FakeTransport::readSome(buf, n);
+    }
+
+private:
+    int stallsLeft_;
+    int* stallPollsOut_;
+    int stallPolls_ = 0;
+};
+
 // Wraps a single transport in a TransportFactory that hands it out exactly
 // once, matching AdbClient's "fresh transport per operation" contract. A
 // second call (which would indicate a bug in AdbClient) fails loudly
@@ -590,6 +633,130 @@ TEST(AdbClientSuite, syncSendFailAfterDoneSurfacesServerMessage) {
 
     CHECK(!err.ok);
     CHECK_STR_EQ(err.message, message);
+}
+
+// When adbd hits a write error partway through a SEND -- the card fills
+// up at 40% of a 2 GB video, the target directory is read-only -- it
+// answers with a sync FAIL and closes. The client is several 64 KB chunks
+// ahead by then, so what it notices is its own write failing with EPIPE,
+// while "No space left on device" sits unread in the socket buffer and
+// used to be thrown away by t->close(). "failed to write DATA chunk:
+// Broken pipe" is true and useless; "your phone is full" is the one thing
+// a file manager has to get right here.
+
+TEST(AdbClientSuite, syncSendPrefersAPendingFailMessageOverTheWriteErrno) {
+    const size_t fileSize = 150000; // three DATA chunks
+    std::string content(fileSize, 'Q');
+    TempFile temp;
+    writeWholeFile(temp.fd(), content);
+
+    std::string remote = "/sdcard/big.bin";
+    uint32_t mode = 0100644;
+    std::string message = "No space left on device";
+
+    std::string script = "OKAY" "OKAY" + syncFailBytes(message);
+    auto transport = std::make_unique<RecordingTransport>(script, nullptr, nullptr);
+    // Fail the write partway through the second DATA chunk: the handshake
+    // and the first chunk get through, then the socket goes.
+    std::string spec = encodeSendPathSpec(remote, mode);
+    size_t throughFirstChunk = encodeHostRequest("host:transport:SERIAL1").size() +
+                                encodeHostRequest("sync:").size() +
+                                syncHeaderBytes("SEND", static_cast<uint32_t>(spec.size())).size() +
+                                spec.size() + syncHeaderBytes("DATA", 65536).size() + 65536;
+    transport->failWritesAfterBytes(throughFirstChunk);
+    AdbClient client(singleUseFactory(std::move(transport)));
+
+    ProgressFn progress = [](uint64_t, uint64_t) { return true; };
+    AdbError err =
+        client.syncSend("SERIAL1", temp.fd(), fileSize, remote, mode, 1700000000, progress);
+
+    CHECK(!err.ok);
+    CHECK_STR_EQ(err.message, message);
+}
+
+TEST(AdbClientSuite, syncSendKeepsTheWriteErrorWhenNoFailPacketIsWaiting) {
+    const size_t fileSize = 150000;
+    std::string content(fileSize, 'Q');
+    TempFile temp;
+    writeWholeFile(temp.fd(), content);
+
+    std::string remote = "/sdcard/big.bin";
+    uint32_t mode = 0100644;
+
+    // Nothing scripted past the handshake: the peer went away without
+    // saying anything, so the transport's own error text is all there is.
+    auto transport = std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), nullptr, nullptr);
+    std::string spec = encodeSendPathSpec(remote, mode);
+    size_t throughFirstChunk = encodeHostRequest("host:transport:SERIAL1").size() +
+                                encodeHostRequest("sync:").size() +
+                                syncHeaderBytes("SEND", static_cast<uint32_t>(spec.size())).size() +
+                                spec.size() + syncHeaderBytes("DATA", 65536).size() + 65536;
+    transport->failWritesAfterBytes(throughFirstChunk);
+    AdbClient client(singleUseFactory(std::move(transport)));
+
+    ProgressFn progress = [](uint64_t, uint64_t) { return true; };
+    AdbError err =
+        client.syncSend("SERIAL1", temp.fd(), fileSize, remote, mode, 1700000000, progress);
+
+    CHECK(!err.ok);
+    CHECK(err.message.find("failed to write DATA chunk") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------
+// Cancellation while the socket is stalled.
+//
+// The between-chunks cancellation check is useless when the bytes stop
+// arriving: a sleeping phone parks the caller inside one recv() and the
+// next chunk boundary never comes. syncRecv/syncSend therefore install a
+// stall callback on the transport (transport.hpp) that re-polls the
+// progress callback each time the socket times out, and a stall the user
+// gave up on must be reported as a cancellation -- not as an I/O error
+// for a button they pressed themselves.
+// ---------------------------------------------------------------------
+
+TEST(AdbClientSuite, syncRecvPollsProgressWhileStalledAndKeepsGoingWhenNotCancelled) {
+    std::string content = "arrived after a stall";
+    std::string script = "OKAY" "OKAY" +
+                          syncHeaderBytes("DATA", static_cast<uint32_t>(content.size())) + content +
+                          syncHeaderBytes("DONE", 0);
+
+    int stallPolls = 0;
+    auto transport = std::make_unique<StallingTransport>(script, /*stalls=*/3, &stallPolls);
+    AdbClient client(singleUseFactory(std::move(transport)));
+
+    TempFile temp;
+    int progressCalls = 0;
+    ProgressFn progress = [&](uint64_t, uint64_t) {
+        ++progressCalls;
+        return true; // the user has not cancelled
+    };
+
+    AdbError err = client.syncRecv("SERIAL1", "/sdcard/f.bin", temp.fd(), content.size(), progress);
+
+    CHECK(err.ok);
+    CHECK_EQ(stallPolls, 3);
+    CHECK(progressCalls >= 3); // the stalls polled it, over and above the chunk boundary
+    CHECK_STR_EQ(readWholeFile(temp.fd()), content);
+}
+
+TEST(AdbClientSuite, syncRecvCancelledDuringAStallReportsCancellationNotAnIoError) {
+    std::string content = "never delivered";
+    std::string script = "OKAY" "OKAY" +
+                          syncHeaderBytes("DATA", static_cast<uint32_t>(content.size())) + content +
+                          syncHeaderBytes("DONE", 0);
+
+    auto transport = std::make_unique<StallingTransport>(script, /*stalls=*/1, nullptr);
+    AdbClient client(singleUseFactory(std::move(transport)));
+
+    TempFile temp;
+    ProgressFn progress = [](uint64_t, uint64_t) {
+        return false; // Cancel, pressed while nothing is moving
+    };
+
+    AdbError err = client.syncRecv("SERIAL1", "/sdcard/f.bin", temp.fd(), content.size(), progress);
+
+    CHECK(!err.ok);
+    CHECK_STR_EQ(err.message, std::string(ADB_CANCELLED));
 }
 
 // ---------------------------------------------------------------------

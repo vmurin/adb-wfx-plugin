@@ -230,6 +230,31 @@ inline AdbError readListEntry(Transport* t, DirEntry* outEntry, bool* isDent, bo
     return AdbError{};
 }
 
+// After a DATA write fails mid-stream, adbd has very often already
+// explained why: it hit its own write error (the card filled up, the
+// target is read-only, EACCES), sent a sync FAIL, and closed -- and that
+// close is what broke our write, several 64 KB chunks later. The errno
+// text ("Broken pipe") is accurate and useless; the FAIL body is the
+// sentence the user needs. Look for one and hand it back.
+//
+// Cannot hang: this is only ever called after a write failed, which on
+// this transport means the peer is already gone, so the read either
+// returns the buffered FAIL immediately or fails immediately. Returns
+// false -- leaving the caller's errno-based message in place -- unless a
+// complete, non-empty FAIL packet was genuinely waiting.
+inline bool readPendingSyncFail(Transport* t, std::string* message) {
+    SyncHeader header;
+    if (!readSyncHeader(t, &header) || !syncIdIs(header, "FAIL")) {
+        return false;
+    }
+    AdbError failErr = readSyncFailMessage(t, header.arg);
+    if (failErr.message.empty()) {
+        return false;
+    }
+    *message = failErr.message;
+    return true;
+}
+
 inline bool shouldContinue(const ProgressFn& progress, uint64_t done, uint64_t total) {
     return !progress || progress(done, total);
 }
@@ -422,27 +447,32 @@ public:
             return guardErr;
         }
 
+        // Declared before the transport so it outlives the stall
+        // callback installed on it below, which captures it by reference.
+        uint64_t done = 0;
+        bool stallCancelled = false;
+
         AdbError err;
         std::unique_ptr<Transport> t = openSyncTransport(serial, &err);
         if (!t) {
             return err;
         }
+        installStallCallback(t.get(), progress, &done, expectedSize, &stallCancelled);
 
         if (!adbclient_detail::writeSyncPacket(t.get(), "RECV", static_cast<uint32_t>(remote.size()),
                                                 remote.data(), remote.size())) {
             AdbError writeErr = adbclient_detail::connectionError(*t, "failed to write RECV request");
             t->close();
-            return writeErr;
+            return cancellationOr(stallCancelled, writeErr);
         }
 
         std::vector<unsigned char> buffer(SYNC_DATA_MAX);
-        uint64_t done = 0;
         for (;;) {
             SyncHeader header;
             if (!adbclient_detail::readSyncHeader(t.get(), &header)) {
                 AdbError readErr = adbclient_detail::connectionError(*t, "failed to read sync reply from adb server");
                 t->close();
-                return readErr;
+                return cancellationOr(stallCancelled, readErr);
             }
             if (syncIdIs(header, "DONE")) {
                 break;
@@ -464,7 +494,7 @@ public:
             if (!t->readExactly(buffer.data(), header.arg)) {
                 AdbError readErr = adbclient_detail::connectionError(*t, "failed to read DATA chunk from adb server");
                 t->close();
-                return readErr;
+                return cancellationOr(stallCancelled, readErr);
             }
             if (!adbclient_detail::writeAllToFd(localFd, buffer.data(), header.arg)) {
                 // errno must be captured before any other call (including
@@ -493,22 +523,27 @@ public:
             return guardErr;
         }
 
+        // Declared before the transport for the same reason as in
+        // syncRecv above.
+        uint64_t done = 0;
+        bool stallCancelled = false;
+
         AdbError err;
         std::unique_ptr<Transport> t = openSyncTransport(serial, &err);
         if (!t) {
             return err;
         }
+        installStallCallback(t.get(), progress, &done, localSize, &stallCancelled);
 
         std::string spec = encodeSendPathSpec(remote, mode);
         if (!adbclient_detail::writeSyncPacket(t.get(), "SEND", static_cast<uint32_t>(spec.size()),
                                                 spec.data(), spec.size())) {
             AdbError writeErr = adbclient_detail::connectionError(*t, "failed to write SEND request");
             t->close();
-            return writeErr;
+            return cancellationOr(stallCancelled, writeErr);
         }
 
         std::vector<unsigned char> buffer(SYNC_DATA_MAX);
-        uint64_t done = 0;
         while (done < localSize) {
             uint64_t remaining = localSize - done;
             uint32_t chunkLen = static_cast<uint32_t>(std::min<uint64_t>(remaining, SYNC_DATA_MAX));
@@ -523,8 +558,15 @@ public:
             }
             if (!adbclient_detail::writeSyncPacket(t.get(), "DATA", chunkLen, buffer.data(), chunkLen)) {
                 AdbError writeErr = adbclient_detail::connectionError(*t, "failed to write DATA chunk");
+                // The write most likely broke because adbd already said
+                // why and hung up. Prefer its reason over our errno.
+                std::string pendingFail;
+                if (!stallCancelled &&
+                    adbclient_detail::readPendingSyncFail(t.get(), &pendingFail)) {
+                    writeErr = adbclient_detail::makeError(pendingFail);
+                }
                 t->close();
-                return writeErr;
+                return cancellationOr(stallCancelled, writeErr);
             }
 
             done += chunkLen;
@@ -538,14 +580,14 @@ public:
         if (!adbclient_detail::writeSyncPacket(t.get(), "DONE", mtimeArg, nullptr, 0)) {
             AdbError writeErr = adbclient_detail::connectionError(*t, "failed to write DONE");
             t->close();
-            return writeErr;
+            return cancellationOr(stallCancelled, writeErr);
         }
 
         SyncHeader finalHeader;
         if (!adbclient_detail::readSyncHeader(t.get(), &finalHeader)) {
             AdbError readErr = adbclient_detail::connectionError(*t, "failed to read final reply from adb server");
             t->close();
-            return readErr;
+            return cancellationOr(stallCancelled, readErr);
         }
         if (syncIdIs(finalHeader, "FAIL")) {
             AdbError result = adbclient_detail::readSyncFailMessage(t.get(), finalHeader.arg);
@@ -597,6 +639,40 @@ public:
     }
 
 private:
+    // Keeps Cancel responsive while the socket is stalled. With
+    // SO_RCVTIMEO/SO_SNDTIMEO set (transport.hpp), a phone that sleeps
+    // mid-transfer makes recv()/send() return every SOCKET_TIMEOUT_MS
+    // instead of blocking forever, and this hook re-polls the caller's
+    // progress callback at each of those points -- without it, Cancel is
+    // only noticed at the next chunk boundary, which for a stalled
+    // transfer never arrives. *done is read at each poll, so it must
+    // outlive the transport (both call sites declare it first).
+    static void installStallCallback(Transport* t, const ProgressFn& progress,
+                                     const uint64_t* done, uint64_t total, bool* cancelled) {
+        if (!progress) {
+            return;
+        }
+        t->setStallCallback([&progress, done, total, cancelled]() -> bool {
+            bool keepGoing = progress(*done, total);
+            if (!keepGoing) {
+                *cancelled = true;
+            }
+            return keepGoing;
+        });
+    }
+
+    // A transport failure that happened after the stall callback gave up
+    // waiting IS that cancellation surfacing -- the transport has no way
+    // to say so in its own vocabulary. Report it the way a cancellation
+    // between chunks is reported, so the caller shows "aborted" rather
+    // than an I/O error dialog for a button the user pressed themselves.
+    static AdbError cancellationOr(bool stallCancelled, AdbError err) {
+        if (stallCancelled) {
+            return AdbError{false, ADB_CANCELLED};
+        }
+        return err;
+    }
+
     // Rejects a remote path that is too long for the sync protocol, before
     // any transport is created and any byte is written.
     static bool checkPathLength(const std::string& path, AdbError* err) {

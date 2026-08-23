@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -183,6 +184,109 @@ TEST(LoopTransferSuite, zeroResultStopsTheLoop) {
     };
 
     CHECK(!transport_detail::loopTransfer(raw, 5));
+}
+
+// ---------------------------------------------------------------------
+// The stall hook. connectTo now sets SO_RCVTIMEO/SO_SNDTIMEO, so a socket
+// that stops moving (the phone sleeps mid-pull, USB renegotiates) reports
+// EAGAIN/EWOULDBLOCK instead of blocking forever. That is not an error
+// and must never be reported as one: the loops below poll the stall
+// callback -- which is how AdbClient re-checks the user's Cancel button
+// while stuck inside a single recv()/send() -- and keep waiting unless it
+// says to stop. With no callback installed the behaviour is the old one:
+// wait indefinitely.
+// ---------------------------------------------------------------------
+
+TEST(LoopTransferSuite, timeoutKeepsWaitingWhenNoStallCallbackIsInstalled) {
+    int callCount = 0;
+    auto raw = [&](size_t, size_t remaining) -> ptrdiff_t {
+        ++callCount;
+        if (callCount <= 2) {
+            errno = EAGAIN;
+            return -1;
+        }
+        return static_cast<ptrdiff_t>(remaining);
+    };
+
+    CHECK(transport_detail::loopTransfer(raw, 5));
+    CHECK_EQ(callCount, 3); // two timeouts waited through, then the real transfer
+}
+
+TEST(LoopTransferSuite, timeoutPollsTheStallCallbackAndKeepsWaitingWhenItSaysSo) {
+    int stallPolls = 0;
+    auto onStall = [&]() -> bool {
+        ++stallPolls;
+        return true; // "the user has not cancelled"
+    };
+    int callCount = 0;
+    auto raw = [&](size_t, size_t remaining) -> ptrdiff_t {
+        ++callCount;
+        if (callCount == 1) {
+            errno = EWOULDBLOCK;
+            return -1;
+        }
+        return static_cast<ptrdiff_t>(remaining);
+    };
+
+    CHECK(transport_detail::loopTransfer(raw, 4, onStall));
+    CHECK_EQ(stallPolls, 1);
+}
+
+TEST(LoopTransferSuite, timeoutStopsTheLoopWhenTheStallCallbackCancels) {
+    auto onStall = []() -> bool {
+        return false; // "Cancel was pressed"
+    };
+    int callCount = 0;
+    auto raw = [&](size_t, size_t) -> ptrdiff_t {
+        ++callCount;
+        errno = EAGAIN;
+        return -1;
+    };
+
+    CHECK(!transport_detail::loopTransfer(raw, 4, onStall));
+    CHECK_EQ(callCount, 1); // abandoned at the first stall, not retried
+}
+
+TEST(RetryOnEintrSuite, timeoutKeepsWaitingWhenNoStallCallbackIsInstalled) {
+    int callCount = 0;
+    auto raw = [&]() -> ptrdiff_t {
+        ++callCount;
+        if (callCount <= 2) {
+            errno = EAGAIN;
+            return -1;
+        }
+        return 9;
+    };
+
+    CHECK_EQ(transport_detail::retryOnEintr(raw), 9);
+    CHECK_EQ(callCount, 3);
+}
+
+TEST(RetryOnEintrSuite, timeoutCancelledByTheStallCallbackReportsAnErrorNotEof) {
+    int stallPolls = 0;
+    auto onStall = [&]() -> bool {
+        ++stallPolls;
+        return false;
+    };
+    auto raw = [&]() -> ptrdiff_t {
+        errno = EAGAIN;
+        return -1;
+    };
+
+    ptrdiff_t result = transport_detail::retryOnEintr(raw, onStall);
+
+    // -1, never 0: a stalled socket that the user gave up on is an error,
+    // and misreporting it as EOF would truncate a download silently.
+    CHECK_EQ(result, -1);
+    CHECK_EQ(stallPolls, 1);
+}
+
+TEST(IsTimeoutErrnoSuite, recognisesTheSocketTimeoutErrnosAndNothingElse) {
+    CHECK(transport_detail::isTimeoutErrno(EAGAIN));
+    CHECK(transport_detail::isTimeoutErrno(EWOULDBLOCK));
+    CHECK(!transport_detail::isTimeoutErrno(EINTR));
+    CHECK(!transport_detail::isTimeoutErrno(EIO));
+    CHECK(!transport_detail::isTimeoutErrno(EPIPE));
 }
 
 // ---------------------------------------------------------------------
@@ -393,3 +497,81 @@ TEST(TcpTransportSuite, readSomeSetsLastErrorOnARealErrorPath) {
     CHECK(!transport->lastError().empty());
 }
 
+// ---------------------------------------------------------------------
+// TcpTransport's socket timeouts, end to end over a real socket against a
+// deliberately silent peer. connectTo takes the timeout in milliseconds so
+// these can prove the behaviour in well under a second instead of waiting
+// out the SOCKET_TIMEOUT_MS the plugin itself uses.
+// ---------------------------------------------------------------------
+
+TEST(TcpTransportSuite, stalledReadPollsTheStallCallbackAndReportsAnErrorWhenCancelled) {
+    int port = 0;
+    int listenFd = startListener(&port);
+
+    // The server accepts and then says nothing at all until the client is
+    // done -- exactly what a sleeping phone looks like mid-transfer.
+    std::thread server([listenFd]() {
+        int connFd = ::accept(listenFd, nullptr, nullptr);
+        char sink[1];
+        ::recv(connFd, sink, sizeof(sink), 0);
+        ::close(connFd);
+    });
+
+    std::string error;
+    std::unique_ptr<TcpTransport> transport =
+        TcpTransport::connectTo("127.0.0.1", port, &error, /*timeoutMs=*/50);
+    CHECK(transport != nullptr);
+
+    int stallPolls = 0;
+    transport->setStallCallback([&stallPolls]() -> bool {
+        ++stallPolls;
+        return stallPolls < 3; // keep waiting twice, then "Cancel"
+    });
+
+    char buf[16];
+    ptrdiff_t result = transport->readSome(buf, sizeof(buf));
+
+    CHECK_EQ(result, -1); // an abandoned stall is an error, NOT EOF
+    CHECK_EQ(stallPolls, 3);
+    CHECK(transport->lastError().find("cancel") != std::string::npos);
+
+    transport->close();
+    server.join();
+    ::close(listenFd);
+}
+
+TEST(TcpTransportSuite, stalledReadResumesWhenDataFinallyArrives) {
+    int port = 0;
+    int listenFd = startListener(&port);
+
+    std::thread server([listenFd]() {
+        int connFd = ::accept(listenFd, nullptr, nullptr);
+        // Stay silent long enough to trip several 50 ms read timeouts,
+        // then deliver -- the transport must not have given up.
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        ::send(connFd, "late", 4, 0);
+        char sink[1];
+        ::recv(connFd, sink, sizeof(sink), 0);
+        ::close(connFd);
+    });
+
+    std::string error;
+    std::unique_ptr<TcpTransport> transport =
+        TcpTransport::connectTo("127.0.0.1", port, &error, /*timeoutMs=*/50);
+    CHECK(transport != nullptr);
+
+    int stallPolls = 0;
+    transport->setStallCallback([&stallPolls]() -> bool {
+        ++stallPolls;
+        return true; // never cancelled
+    });
+
+    char buf[4] = {};
+    CHECK(transport->readExactly(buf, 4));
+    CHECK(std::memcmp(buf, "late", 4) == 0);
+    CHECK(stallPolls > 0); // the stall path really was exercised
+
+    transport->close();
+    server.join();
+    ::close(listenFd);
+}
