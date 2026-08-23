@@ -1,6 +1,6 @@
 # adb-wfx
 
-[![CI](https://github.com/vmurin/adb-wfx-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/vmurin/adb-wfx-plugin/actions/workflows/ci.yml)
+[![CI](https://github.com/vmurin/adb-wfx-plugin/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/vmurin/adb-wfx-plugin/actions/workflows/ci.yml?query=branch%3Amain)
 [![Latest release](https://img.shields.io/github/v/release/vmurin/adb-wfx-plugin?sort=semver)](https://github.com/vmurin/adb-wfx-plugin/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
