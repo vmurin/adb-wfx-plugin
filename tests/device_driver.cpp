@@ -24,13 +24,16 @@
 #include "../fsplugin_impl.hpp"
 #include "../transport.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <fcntl.h>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -63,6 +66,8 @@ void printUsage() {
         "  list <wfxpath>\n"
         "  get <wfxremote> <local> [cancelAfterBytes]\n"
         "  put <local> <wfxremote> [cancelAfterBytes]\n"
+        "  putmany <localdir> <wfxdir>\n"
+        "  getmany <wfxdir> <localdir>\n"
         "  mkdir <wfxpath>\n"
         "  rm <wfxpath>\n"
         "  rmdir <wfxpath>\n"
@@ -75,11 +80,23 @@ void printUsage() {
         "\n"
         "cancelAfterBytes, if given and > 0, makes get/put cancel the\n"
         "transfer (as if the user clicked Cancel) once that many bytes\n"
-        "have moved -- used by device_test.sh's cancellation check.\n";
+        "have moved -- used by device_test.sh's cancellation check.\n"
+        "\n"
+        "putmany/getmany move every regular file of a directory in ONE\n"
+        "process, over one PluginCore -- the shape `adb push`/`adb pull`\n"
+        "already have, and the only fair comparison for tests/bench.sh.\n";
 }
 
 // Builds the same AdbClient wiring FsInitW uses in fsplugin.cpp: find and
 // start a local adb server, then connect over TCP to it per request.
+//
+// The server is only started when a plain connect to the port fails.
+// startAdbServer is a posix_spawn + waitpid of the adb binary, and this
+// binary is invoked once per file by the older shape of tests/bench.sh --
+// paying that process launch a hundred times per run made the plugin arm
+// look 30-70% slower than it is. Probing first costs one loopback connect
+// against an already-running server, and still starts one when there
+// genuinely isn't one.
 std::unique_ptr<AdbClient> makeClient() {
     auto getEnv = [](const char* name) -> const char* { return std::getenv(name); };
     auto isExecutable = [](const std::string& path) -> bool {
@@ -87,9 +104,15 @@ std::unique_ptr<AdbClient> makeClient() {
     };
 
     int port = adbServerPort(getEnv);
-    std::string adbBinary = findAdbBinary(getEnv, isExecutable);
-    if (!adbBinary.empty()) {
-        startAdbServer(adbBinary);
+    std::string probeError;
+    std::unique_ptr<TcpTransport> probe = TcpTransport::connectTo(ADB_SERVER_HOST, port, &probeError);
+    if (probe) {
+        probe->close();
+    } else {
+        std::string adbBinary = findAdbBinary(getEnv, isExecutable);
+        if (!adbBinary.empty()) {
+            startAdbServer(adbBinary);
+        }
     }
 
     TransportFactory factory = [port](std::string* error) -> std::unique_ptr<Transport> {
@@ -197,6 +220,89 @@ int cmdPut(AdbClient& client, const std::string& localPath, const std::string& w
     return EXIT_ERROR;
 }
 
+// Names of the regular files directly inside localDir, sorted so a run is
+// reproducible. Subdirectories, dotfiles and anything that is not a
+// regular file are skipped -- putmany is a flat corpus mover, not a
+// recursive copy.
+bool localRegularFileNames(const std::string& localDir, std::vector<std::string>* out) {
+    DIR* dir = ::opendir(localDir.c_str());
+    if (dir == nullptr) {
+        return false;
+    }
+    struct dirent* entry;
+    while ((entry = ::readdir(dir)) != nullptr) {
+        std::string name = entry->d_name;
+        if (name.empty() || name[0] == '.') {
+            continue;
+        }
+        struct stat st;
+        if (::stat((localDir + "/" + name).c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+            continue;
+        }
+        out->push_back(name);
+    }
+    ::closedir(dir);
+    std::sort(out->begin(), out->end());
+    return true;
+}
+
+// Uploads every regular file of localDir into wfxDir, in ONE process over
+// ONE PluginCore. tests/bench.sh's baseline arm is a single `adb push` of
+// the whole directory over a single connection; driving the plugin one
+// file per process meant paying a process launch (and, before the probe
+// in makeClient above, an `adb start-server` spawn) a hundred times that
+// the baseline never paid. This is the matching shape.
+int cmdPutMany(AdbClient& client, const std::string& localDir, const std::string& wfxDir) {
+    std::vector<std::string> names;
+    if (!localRegularFileNames(localDir, &names)) {
+        std::cerr << "ERROR: cannot read local directory: " << localDir << "\n";
+        return EXIT_ERROR;
+    }
+    PluginCore core(client);
+    for (const std::string& name : names) {
+        std::string error;
+        int result = core.putFile(localDir + "/" + name, joinWfxPath(wfxDir, name),
+                                  DRIVER_COPY_FLAGS, ProgressFn(), &error);
+        if (result != FS_FILE_OK) {
+            std::cerr << "ERROR: putFile(" << name << ") failed (code " << result << "): " << error
+                      << "\n";
+            return EXIT_ERROR;
+        }
+    }
+    std::cout << "OK " << names.size() << "\n";
+    return EXIT_OK;
+}
+
+// The download counterpart of cmdPutMany: lists wfxDir once and pulls
+// every non-directory entry into localDir, all in one process.
+int cmdGetMany(AdbClient& client, const std::string& wfxDir, const std::string& localDir) {
+    PluginCore core(client);
+    std::vector<FindResult> entries;
+    std::string warning;
+    std::string error;
+    if (!core.listDirectory(wfxDir, &entries, &warning, &error)) {
+        std::cerr << "ERROR: " << error << "\n";
+        return EXIT_ERROR;
+    }
+    size_t moved = 0;
+    for (const FindResult& e : entries) {
+        if (e.isDir) {
+            continue;
+        }
+        std::string getError;
+        int result = core.getFile(joinWfxPath(wfxDir, e.name), localDir + "/" + e.name,
+                                  DRIVER_COPY_FLAGS, ProgressFn(), &getError);
+        if (result != FS_FILE_OK) {
+            std::cerr << "ERROR: getFile(" << e.name << ") failed (code " << result
+                      << "): " << getError << "\n";
+            return EXIT_ERROR;
+        }
+        ++moved;
+    }
+    std::cout << "OK " << moved << "\n";
+    return EXIT_OK;
+}
+
 int cmdMkdir(AdbClient& client, const std::string& wfxPath) {
     PluginCore core(client);
     std::string error;
@@ -299,6 +405,20 @@ int main(int argc, char** argv) {
             }
             int64_t cancelAfter = parseOptionalInt(argc, argv, 4, 0);
             return cmdPut(*client, argv[2], argv[3], static_cast<uint64_t>(cancelAfter));
+        }
+        if (command == "putmany") {
+            if (argc != 4) {
+                printUsage();
+                return EXIT_USAGE;
+            }
+            return cmdPutMany(*client, argv[2], argv[3]);
+        }
+        if (command == "getmany") {
+            if (argc != 4) {
+                printUsage();
+                return EXIT_USAGE;
+            }
+            return cmdGetMany(*client, argv[2], argv[3]);
         }
         if (command == "mkdir") {
             if (argc != 3) {

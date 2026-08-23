@@ -10,6 +10,14 @@
 # reports; it never fails the build on the numbers (constraints.md /
 # task-10-brief.md).
 #
+# Both arms must have the SAME shape or the numbers mean nothing. `adb
+# push`/`adb pull` move the whole corpus in one process; the plugin arm
+# therefore uses device_driver's putmany/getmany, which do the same over
+# one PluginCore. An earlier version of this script ran `device_driver
+# put` once per file -- 100 process launches per run, each of which also
+# spawned `adb start-server` -- and would have reported MTP-level numbers
+# for a plugin that is actually fast.
+#
 # Safety: builds its local corpus in a FRESH temp directory and removes
 # only that directory (never an ambient one); every on-device path is
 # $TEST_ROOT or a path under it, guarded by assert_under_test_root()
@@ -120,10 +128,7 @@ for run in $(seq 1 "$RUNS"); do
     assert_under_test_root "$REMOTE_PLUGIN_DIR"
     "$ADB_BIN" -s "$SERIAL" shell "rm -rf '$REMOTE_PLUGIN_DIR'" >/dev/null 2>&1 || true
     "$DRIVER" mkdir "$WFX_PLUGIN_DIR" >/dev/null
-    elapsed=$( { time { for f in "$CORPUS_DIR"/*; do
-        name="$(basename "$f")"
-        "$DRIVER" put "$f" "$WFX_PLUGIN_DIR/$name" >/dev/null 2>&1
-    done; }; } 2>&1 | tail -1 )
+    elapsed=$( { time "$DRIVER" putmany "$CORPUS_DIR" "$WFX_PLUGIN_DIR" >/dev/null 2>&1; } 2>&1 | tail -1 )
     echo "  run $run: ${elapsed}s"
     plugin_put_times+=("$elapsed")
 done
@@ -135,10 +140,7 @@ plugin_get_times=()
 for run in $(seq 1 "$RUNS"); do
     rm -rf "$DOWNLOAD_PLUGIN_DIR"
     mkdir -p "$DOWNLOAD_PLUGIN_DIR"
-    elapsed=$( { time { for f in "$CORPUS_DIR"/*; do
-        name="$(basename "$f")"
-        "$DRIVER" get "$WFX_PLUGIN_DIR/$name" "$DOWNLOAD_PLUGIN_DIR/$name" >/dev/null 2>&1
-    done; }; } 2>&1 | tail -1 )
+    elapsed=$( { time "$DRIVER" getmany "$WFX_PLUGIN_DIR" "$DOWNLOAD_PLUGIN_DIR" >/dev/null 2>&1; } 2>&1 | tail -1 )
     echo "  run $run: ${elapsed}s"
     plugin_get_times+=("$elapsed")
 done
