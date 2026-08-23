@@ -3,7 +3,7 @@
 // to look on the real machine; the lookup logic is exercised in tests
 // entirely through the injected `getEnv` / `isExecutable` seams, and
 // `startAdbServer` is the one function here that actually touches the OS
-// (spawns a process). See docs/plan-adb-wfx.md (Task 6).
+// (spawns a process).
 #ifndef ADB_WFX_ADBSERVER_HPP
 #define ADB_WFX_ADBSERVER_HPP
 

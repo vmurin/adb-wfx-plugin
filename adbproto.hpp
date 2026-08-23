@@ -2,9 +2,8 @@
 // wire-protocol codec built on top of it: host-request framing, the
 // OKAY/FAIL status word, sync-v1 packet headers/bodies, the SEND path
 // spec, and the `host:devices-l` text format. Everything here is bytes
-// in, values out -- no sockets, no files, no processes. See
-// docs/plan-adb-wfx.md (Task 4) for the wire-format reference this was
-// implemented against.
+// in, values out -- no sockets, no files, no processes. Implemented
+// against the AOSP ADB sync protocol (v1).
 #ifndef ADB_WFX_ADBPROTO_HPP
 #define ADB_WFX_ADBPROTO_HPP
 

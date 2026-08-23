@@ -2,10 +2,9 @@
 // device naming, caching, the download-to-temp-then-rename dance, mtime
 // preservation in both directions, and the shell commands used for the
 // mutating operations the sync protocol doesn't cover -- lives here, so
-// that fsplugin.cpp (Task 9) can be a mechanical extern "C" shim over it.
+// that fsplugin.cpp can be a mechanical extern "C" shim over it.
 // Works entirely in UTF-8 std::string; UTF-16 conversion is the shim's
-// job, not this one's. See docs/plan-adb-wfx.md (Task 8) and
-// constraints.md for the behavioural contract this was built against.
+// job, not this one's.
 #ifndef ADB_WFX_FSPLUGIN_IMPL_HPP
 #define ADB_WFX_FSPLUGIN_IMPL_HPP
 
@@ -39,10 +38,10 @@ struct FindResult {
 };
 
 // ---------------------------------------------------------------------
-// fsplugin.cpp (Task 9) helpers.
+// fsplugin.cpp helpers.
 //
-// These serve the extern "C" shim, not PluginCore -- but constraints.md
-// #4 (header-only modules: only fsplugin.cpp and tests/*.cpp are
+// These serve the extern "C" shim, not PluginCore -- but this project's
+// header-only-module rule (only fsplugin.cpp and tests/*.cpp are
 // translation units) means they have to live in a header to be testable
 // directly, without dlopen'ing the built plugin. They live here, next to
 // FindResult, rather than in a header of their own, because YAGNI: one

@@ -1,7 +1,6 @@
 // Tests for adbutils.hpp: WFX remote path parsing/joining, single-quote
 // shell escaping for the `shell:` service, and the directory listing
-// cache. Written before adbutils.hpp exists (TDD) -- see
-// .superpowers/sdd/plan-adb-wfx/task-3-report.md for the RED run.
+// cache. Written before adbutils.hpp exists (TDD).
 #include "adbutils.hpp"
 
 #include "testing.hpp"

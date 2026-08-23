@@ -1,6 +1,5 @@
 // Tests for fsplugin_impl.hpp: PluginCore, the WFX logic layer. Written
-// before fsplugin_impl.hpp exists (TDD) -- see
-// .superpowers/sdd/plan-adb-wfx/task-8-report.md for the RED run. Every
+// before fsplugin_impl.hpp exists (TDD). Every
 // test here is driven by scripted FakeTransports through a real AdbClient;
 // nothing touches a real adb server or phone. Local temp files live in a
 // unique per-test directory, cleaned up on destruction.
@@ -1284,7 +1283,7 @@ TEST(ShellMutationSuite, renameOrMoveWithOverwriteSendsPlainMvCommand) {
 }
 
 TEST(ShellMutationSuite, renameOrMoveWithoutOverwriteChecksTargetFirstThenSendsPlainMv) {
-    // Task 9 review round 1: "mv -n" against an existing target exits 0
+    // "mv -n" against an existing target exits 0
     // and prints nothing on this shell -- indistinguishable, via the
     // "empty output means success" check, from a rename that actually
     // happened. So a non-overwriting rename must stat the target first
@@ -1374,7 +1373,7 @@ TEST(ShellMutationSuite, renameOrMoveAcrossDevicesIsRejectedWithoutWritingAnyByt
 }
 
 TEST(ShellMutationSuite, renameOrMoveAcrossDevicesSetsCrossDeviceOutParam) {
-    // fsplugin.cpp (Task 9) needs to tell a cross-device rejection --
+    // fsplugin.cpp needs to tell a cross-device rejection --
     // where DC's own copy+delete fallback can actually succeed -- apart
     // from every other failure, where retrying via that same fallback
     // would just waste a full download+upload+delete on a doomed
@@ -1409,7 +1408,7 @@ TEST(ShellMutationSuite, renameOrMoveGenericFailureLeavesCrossDeviceFalse) {
 }
 
 TEST(ShellMutationSuite, renameOrMoveWithoutOverwriteAndExistingTargetSetsTargetExistsOutParam) {
-    // Task 9 review round 2: FsRenMovFileW needs to map a refused
+    // FsRenMovFileW needs to map a refused
     // overwrite to FS_FILE_EXISTS specifically (the SDK code the getFile/
     // putFile overwrite checks already use), not the generic
     // FS_FILE_WRITEERROR a plain bool can't distinguish from any other

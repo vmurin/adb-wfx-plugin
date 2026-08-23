@@ -1,9 +1,7 @@
 // Tests for adbclient.hpp: the ADB client that drives the wire protocol
 // (host requests, sync v1, shell:) over the Transport seam. Written before
-// adbclient.hpp exists (TDD) -- see
-// .superpowers/sdd/plan-adb-wfx/task-7-report.md for the RED run. Every
-// test here is driven by a scripted FakeTransport; nothing touches a real
-// adb server or phone.
+// adbclient.hpp exists (TDD). Every test here is driven by a scripted
+// FakeTransport; nothing touches a real adb server or phone.
 #include "adbclient.hpp"
 #include "fake_transport.hpp"
 #include "testing.hpp"
@@ -196,7 +194,8 @@ std::string encodeDent(uint32_t mode, uint32_t size, uint32_t mtime, const std::
 }
 
 // LIST's terminal packet: "DONE" + 16 zero bytes (not the generic 8-byte
-// header -- see constraints.md's sync protocol reference).
+// header used by every other sync packet type, per the AOSP ADB sync
+// protocol).
 std::string encodeListDone() {
     return std::string("DONE") + std::string(16, '\0');
 }

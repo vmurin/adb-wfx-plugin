@@ -7,8 +7,7 @@
 #
 # The spec's target is plugin throughput close to raw adb (~32 MB/s
 # pull), not MTP-level (~19 MB/s) -- this script only measures and
-# reports; it never fails the build on the numbers (constraints.md /
-# task-10-brief.md).
+# reports; it never fails the build on the numbers.
 #
 # Both arms must have the SAME shape or the numbers mean nothing. `adb
 # push`/`adb pull` move the whole corpus in one process; the plugin arm

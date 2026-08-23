@@ -10,8 +10,8 @@ extern "C" {
 #include "wfxplugin.h"
 }
 
-// wfxplugin.h/common.h (both vendored, never edited -- see
-// constraints.md #1) don't define this on a non-Windows build; every
+// wfxplugin.h/common.h (both vendored, never edited) don't define this
+// on a non-Windows build; every
 // other SDK-shaped name (HANDLE, WCHAR, FILETIME, ...) already comes from
 // them, so this belongs here rather than namespaced inside fsplugin.cpp,
 // where a macro can't actually be scoped anyway.

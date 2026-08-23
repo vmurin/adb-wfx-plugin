@@ -1,12 +1,10 @@
 // The ADB client: drives the wire protocol (host requests, sync v1,
-// shell:) over the Transport seam built in Task 5, using the pure codec in
+// shell:) over the Transport seam in transport.hpp, using the pure codec in
 // adbproto.hpp for every byte encoded or decoded. This is the only place
 // that decides *what conversation* to have with the adb server; it never
 // touches a socket directly (that's TcpTransport's job) and never touches
 // the local filesystem beyond reading/writing an already-open fd (that's
-// PluginCore's job, Task 8). See docs/plan-adb-wfx.md (Task 7) and
-// constraints.md's protocol reference for the wire-format this was
-// implemented against.
+// PluginCore's job). Implemented against the AOSP ADB sync protocol (v1).
 #ifndef ADB_WFX_ADBCLIENT_HPP
 #define ADB_WFX_ADBCLIENT_HPP
 
@@ -173,8 +171,8 @@ inline AdbError readSyncFailMessage(Transport* t, uint32_t len) {
 // Reads one LIST-reply entry. DENT and the terminal DONE share a shape --
 // id + mode + size + mtime + namelen + name bytes (DONE's fields are all
 // zero and namelen is 0) -- which is not the generic 8-byte header used by
-// every other sync packet type (see constraints.md: "DENT is the one
-// packet where the second field is not a length"). FAIL still uses the
+// every other sync packet type (DENT is the one packet where the second
+// field is not a length, per the AOSP ADB sync protocol). FAIL still uses the
 // generic 8-byte-header + message shape.
 inline AdbError readListEntry(Transport* t, DirEntry* outEntry, bool* isDent, bool* done) {
     *isDent = false;

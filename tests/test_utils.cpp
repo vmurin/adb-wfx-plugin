@@ -1,6 +1,5 @@
 // Tests for utils.hpp: UTF-16 <-> UTF-8 conversion and FILETIME <-> time_t
-// arithmetic. Written before utils.hpp exists (TDD) -- see
-// .superpowers/sdd/plan-adb-wfx/task-2-report.md for the RED run.
+// arithmetic. Written before utils.hpp exists (TDD).
 #include "utils.hpp"
 #include "testing.hpp"
 

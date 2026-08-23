@@ -1,7 +1,6 @@
 // Tests for transport.hpp (the I/O seam) and tests/fake_transport.hpp (the
-// scripted double Tasks 6-9 are built against). Written before either
-// header existed (TDD) -- see
-// .superpowers/sdd/plan-adb-wfx/task-5-report.md for the RED run.
+// scripted double the rest of the test suite is built against). Written
+// before either header existed (TDD).
 #include "transport.hpp"
 #include "fake_transport.hpp"
 #include "testing.hpp"
@@ -293,9 +292,9 @@ TEST(IsTimeoutErrnoSuite, recognisesTheSocketTimeoutErrnosAndNothingElse) {
 
 // ---------------------------------------------------------------------
 // transport_detail::retryOnEintr -- the seam TcpTransport::readSome uses to
-// hide a transient EINTR from every caller, not just readExactly (Task 7's
-// AdbClient calls readSome directly to stream sync DATA chunks and drain
-// shell: output, so a bare EINTR must never surface to it as a hard -1).
+// hide a transient EINTR from every caller, not just readExactly (AdbClient
+// calls readSome directly to stream sync DATA chunks and drain shell:
+// output, so a bare EINTR must never surface to it as a hard -1).
 // ---------------------------------------------------------------------
 
 TEST(RetryOnEintrSuite, retriesOnEintrThenReturnsTheRealResult) {

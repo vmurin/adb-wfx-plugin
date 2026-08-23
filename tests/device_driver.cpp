@@ -9,14 +9,13 @@
 // This file has its own main() and is intentionally NOT named test_*.cpp:
 // run_tests.sh's unit-test build compiles `tests/main.cpp tests/test_*.cpp`
 // and must never pick this up. It is compiled separately, and only when
-// ADB_WFX_DEVICE_TESTS=1 (see run_tests.sh and constraints.md's
-// "Testability by injection" -- this binary is the one place besides
-// fsplugin.cpp itself that is allowed to build a real TcpTransport and
-// talk to a real adb server).
+// ADB_WFX_DEVICE_TESTS=1 (see run_tests.sh -- this binary is the one place
+// besides fsplugin.cpp itself that is allowed to build a real TcpTransport
+// and talk to a real adb server).
 //
 // Every WFX-style path argument below ("/<serial>/<on-device-path>") is
 // exactly what PluginCore consumes -- see adbutils.hpp's parseRemotePath
-// and fsplugin_impl.hpp's public surface (task-8-report.md). Nothing here
+// and fsplugin_impl.hpp's public surface. Nothing here
 // re-implements any plugin logic; it only converts argv into calls on
 // PluginCore and prints the result.
 #include "../adbclient.hpp"
@@ -40,9 +39,9 @@
 namespace {
 
 // Loopback host AdbClient's TransportFactory connects to -- the same
-// constant fsplugin.cpp uses. The port itself follows constraints.md's
-// protocol reference (ANDROID_ADB_SERVER_PORT, falling back to
-// ADB_DEFAULT_PORT) via adbServerPort().
+// constant fsplugin.cpp uses. The port itself is resolved via
+// adbServerPort() (ANDROID_ADB_SERVER_PORT, falling back to
+// ADB_DEFAULT_PORT).
 constexpr const char* ADB_SERVER_HOST = "127.0.0.1";
 
 // device_driver always requests FS_COPYFLAGS_OVERWRITE on get/put so that

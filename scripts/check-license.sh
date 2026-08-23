@@ -2,7 +2,7 @@
 # Fails if any forbidden LGPL/GPL-associated text is found in the tree.
 # Hits are only allowed in README.md (which may legitimately discuss the
 # LGPL situation in prose). Excludes .git, .superpowers, tests/bin, the
-# plan and the design spec (which discuss it too), and this script itself
+# design spec (which discusses it too), and this script itself
 # (whose own pattern text would otherwise match).
 set -euo pipefail
 
@@ -24,7 +24,6 @@ done < <(find . \( \
             -path './.git' -o \
             -path './.superpowers' -o \
             -path './tests/bin' -o \
-            -path './docs/plan-adb-wfx.md' -o \
             -path './scalable-cuddling-crown.md' -o \
             -path './scripts/check-license.sh' \
         \) -prune -o -type f -print0)

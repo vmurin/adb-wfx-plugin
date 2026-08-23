@@ -1,8 +1,7 @@
-// Tests for the fsplugin.cpp (Task 9) helper functions that are factored
-// into fsplugin_impl.hpp per constraints.md #4 (header-only modules; only
+// Tests for the fsplugin.cpp helper functions that are factored
+// into fsplugin_impl.hpp per the header-only-module rule (only
 // fsplugin.cpp and tests/*.cpp are translation units) so they are testable
-// without dlopen'ing the built plugin. See task-9-brief.md's "Required
-// additional test cases".
+// without dlopen'ing the built plugin.
 #include "fsplugin_impl.hpp"
 
 #include "testing.hpp"
@@ -172,8 +171,8 @@ TEST(AdvanceFindDataSuite, successiveCallsWalkTheListingInOrderThenExhaust) {
 
 // ---------------------------------------------------------------------
 // isWriteOperation -- exhaustive over every FS_STATUS_OP_* constant
-// (this is exactly what would have caught Task 9 review round 1's
-// missing SYNC_PUT/SYNC_DELETE).
+// (this is exactly what would have caught a missing SYNC_PUT/SYNC_DELETE
+// case).
 // ---------------------------------------------------------------------
 
 TEST(IsWriteOperationSuite, exactlyTheMutatingOperationsAreWrites) {
@@ -352,8 +351,8 @@ TEST(MakeProgressFnSuite, nullProgressProcAlwaysKeepsGoing) {
 }
 
 // ---------------------------------------------------------------------
-// isUnsetFileTime -- FsSetTimeW's "nothing to set" guard (Task 9 review
-// round 1: a zero-filled FILETIME means "not provided" per utils.hpp's
+// isUnsetFileTime -- FsSetTimeW's "nothing to set" guard (a zero-filled
+// FILETIME means "not provided" per utils.hpp's
 // fileTimeToTime, not epoch 0, and must never be forwarded as a real
 // target time).
 // ---------------------------------------------------------------------

@@ -1,5 +1,5 @@
 // fsplugin.cpp -- the extern "C" export shim, and the ONLY translation
-// unit besides tests/*.cpp in this project (constraints.md #4).
+// unit besides tests/*.cpp in this project.
 //
 // This file owns exactly: process-global state (the callbacks DC hands
 // FsInitW and the AdbClient/PluginCore pair) and UTF-16<->UTF-8
@@ -12,7 +12,7 @@
 // arguments. Every actual decision -- device naming, caching, the
 // download-to-temp-then-rename dance, mtime preservation, which shell
 // commands the mutating operations run -- lives in PluginCore
-// (fsplugin_impl.hpp, Task 8). If a change here starts to look like a
+// (fsplugin_impl.hpp). If a change here starts to look like a
 // policy decision rather than a translation, it belongs there instead.
 //
 // No C++ exception may ever cross this file's extern "C" boundary -- an
@@ -60,9 +60,8 @@
 namespace {
 
 // Host and port fsplugin.cpp's TransportFactory connects to. The port
-// itself is resolved per constraints.md's protocol reference
-// (ANDROID_ADB_SERVER_PORT, falling back to ADB_DEFAULT_PORT) by
-// adbServerPort(); only the loopback host is fixed here.
+// itself is resolved by adbServerPort() (ANDROID_ADB_SERVER_PORT,
+// falling back to ADB_DEFAULT_PORT); only the loopback host is fixed here.
 constexpr const char* ADB_SERVER_HOST = "127.0.0.1";
 
 // The value FsGetDefRootName copies out, and the WFX root path's first
@@ -307,7 +306,7 @@ WFX_EXPORT BOOL DCPCALL FsMkDirW(WCHAR* path) {
     }
 }
 
-// Non-negotiable (see task-9-brief.md and constraints.md): Double
+// Non-negotiable: Double
 // Commander gates copying file dates, in *both* directions, on
 // Assigned(FsSetTime) or Assigned(FsSetTimeW). Without this export, DC
 // silently strips caoCopyTime from every copy operation's flags -- so
@@ -317,7 +316,7 @@ WFX_EXPORT BOOL DCPCALL FsMkDirW(WCHAR* path) {
 WFX_EXPORT BOOL DCPCALL FsSetTimeW(WCHAR* remoteName, FILETIME* creationTime, FILETIME* lastAccessTime,
                         FILETIME* lastWriteTime) {
     try {
-        (void)creationTime;   // ignored per the brief: only LastWriteTime is applied
+        (void)creationTime;   // ignored: only LastWriteTime is applied
         (void)lastAccessTime; // Android's toybox touch has no separate atime knob worth using
         if (!gPluginCore) {
             return false;

@@ -359,7 +359,7 @@ private:
 };
 
 // A factory that produces a fresh Transport (or nullptr + *error on
-// failure). AdbClient (Task 7) is built against this, never a bare socket,
+// failure). AdbClient is built against this, never a bare socket,
 // so it can be driven by FakeTransport in tests.
 using TransportFactory = std::function<std::unique_ptr<Transport>(std::string* error)>;
 
