@@ -58,6 +58,10 @@ remote_path_exists() {
     "$ADB_BIN" -s "$SERIAL" shell "test -e '$1' && echo YES || echo NO" | tr -d '\r\n'
 }
 
+remote_md5() {
+    "$ADB_BIN" -s "$SERIAL" shell "md5sum '$1'" | awk '{print $1}' | tr -d '\r\n'
+}
+
 echo "=== Step 1: device listing ==="
 LIST_ROOT_OUT="$("$DRIVER" list /)"
 echo "$LIST_ROOT_OUT"
@@ -142,6 +146,25 @@ case "$LIST1" in
     *) fail "'$NAME1' missing from listing after put" ;;
 esac
 
+# A copy of the same tricky name, before the rename below consumes it.
+# Double Commander sends F5-inside-one-device through the very same SDK
+# entry point as F6, with the move flag off -- which is why the source
+# surviving is the whole point of this check.
+assert_wfx_under_test_root "$WFX2"
+"$DRIVER" cp "$WFX1" "$WFX2" >/dev/null
+LIST_CP="$("$DRIVER" list "$WFX_ROOT")"
+case "$LIST_CP" in
+    *"$NAME2"*)
+        case "$LIST_CP" in
+            *"$NAME1"*) pass "copied '$NAME1' -> '$NAME2' and the source survived" ;;
+            *) fail "'$NAME1' disappeared after a COPY to '$NAME2' -- the copy ran as a move" ;;
+        esac
+        ;;
+    *) fail "'$NAME2' missing from listing after cp" ;;
+esac
+assert_under_test_root "$REMOTE2_PATH"
+"$DRIVER" rm "$WFX2" >/dev/null
+
 "$DRIVER" mv "$WFX1" "$WFX2" >/dev/null
 LIST2="$("$DRIVER" list "$WFX_ROOT")"
 case "$LIST2" in
@@ -188,6 +211,59 @@ case "$LIST5" in
     *"$NAME3"*) fail "'$NAME3' still present after rm" ;;
     *) pass "deleted literal '\$(id)'/\`id\` filename" ;;
 esac
+
+echo "=== Step 5b: an on-device copy keeps the source and its date ==="
+# ASCII-only paths here: remote_stat_mtime/remote_md5 single-quote their
+# argument for the device's shell and are documented for plain names.
+# onemib.bin still carries FIXED_EPOCH from step 3, which step 6 below
+# then overwrites -- hence this step's position.
+COPY_REMOTE_WFX="$WFX_ROOT/onemib.copy.bin"
+COPY_REMOTE_PATH="$TEST_ROOT/onemib.copy.bin"
+assert_under_test_root "$COPY_REMOTE_PATH"
+"$DRIVER" cp "$ONEMIB_REMOTE_WFX" "$COPY_REMOTE_WFX" >/dev/null
+
+if [ "$(remote_path_exists "$ONEMIB_REMOTE_PATH")" = "YES" ]; then
+    pass "the copy source is still on the device"
+else
+    fail "the copy destroyed its source at $ONEMIB_REMOTE_PATH"
+fi
+
+COPY_EPOCH="$(remote_stat_mtime "$COPY_REMOTE_PATH")"
+if [ "$COPY_EPOCH" = "$FIXED_EPOCH" ]; then
+    pass "copy carries the source's mtime ($COPY_EPOCH), not the time of the copy"
+else
+    fail "copy mtime ($COPY_EPOCH) != source mtime ($FIXED_EPOCH)"
+fi
+
+SUM_SOURCE="$(remote_md5 "$ONEMIB_REMOTE_PATH")"
+SUM_COPY="$(remote_md5 "$COPY_REMOTE_PATH")"
+if [ -n "$SUM_COPY" ] && [ "$SUM_SOURCE" = "$SUM_COPY" ]; then
+    pass "copied bytes match the source ($SUM_COPY)"
+else
+    fail "copy checksum mismatch: source=$SUM_SOURCE copy=$SUM_COPY"
+fi
+
+# Copying onto an existing target without the overwrite flag must be
+# refused -- and must leave the existing file exactly as it was.
+set +e
+"$DRIVER" cp "$ONEMIB_REMOTE_WFX" "$COPY_REMOTE_WFX" >/dev/null 2>&1
+CP_REFUSE_EXIT=$?
+set -e
+CP_REFUSE_EPOCH="$(remote_stat_mtime "$COPY_REMOTE_PATH")"
+if [ "$CP_REFUSE_EXIT" -ne 0 ] && [ "$CP_REFUSE_EPOCH" = "$FIXED_EPOCH" ]; then
+    pass "a copy onto an existing target without overwrite was refused (exit $CP_REFUSE_EXIT)"
+else
+    fail "copy without overwrite should have been refused: exit=$CP_REFUSE_EXIT mtime=$CP_REFUSE_EPOCH"
+fi
+
+assert_under_test_root "$COPY_REMOTE_PATH"
+assert_wfx_under_test_root "$COPY_REMOTE_WFX"
+"$DRIVER" rm "$COPY_REMOTE_WFX" >/dev/null
+if [ "$(remote_path_exists "$COPY_REMOTE_PATH")" = "NO" ]; then
+    pass "removed the on-device copy"
+else
+    fail "the on-device copy is still at $COPY_REMOTE_PATH after rm"
+fi
 
 echo "=== Step 6: settime on a remote file ==="
 SETTIME_EPOCH="$(date -j -u -f "%Y-%m-%d %H:%M:%S" "2010-05-06 07:08:09" "+%s")"

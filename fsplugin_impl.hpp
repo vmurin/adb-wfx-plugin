@@ -600,8 +600,28 @@ public:
         }
 
         if (copyFlags & FS_COPYFLAGS_MOVE) {
-            std::string deleteError; // best-effort: the download already succeeded
-            deleteFile(wfxRemote, &deleteError);
+            std::string deleteError;
+            if (!deleteFile(wfxRemote, &deleteError)) {
+                // The one path in this class where FS_FILE_OK and a
+                // non-empty *error coexist, and fsplugin.cpp's
+                // FsGetFileW reports *error for exactly that reason.
+                //
+                // The code stays OK because the download really did
+                // succeed: the local file is complete and correctly
+                // stamped, and an error code here would have Double
+                // Commander treat a good transfer as a failed one. But
+                // the user asked for a move and got a copy -- the source
+                // is still on the device -- so this cannot pass in
+                // silence. The fallback text matters: reportError is a
+                // no-op on an empty message, and a device that failed
+                // without saying why would otherwise silently lose the
+                // only notice the user gets.
+                if (error != nullptr) {
+                    *error = "downloaded, but failed to delete the source from the device "
+                             "(copied, not moved): " +
+                             (deleteError.empty() ? std::string("unknown error") : deleteError);
+                }
+            }
         }
 
         return FS_FILE_OK;
@@ -673,7 +693,19 @@ public:
         invalidatePathAndParent(wfxRemote);
 
         if (copyFlags & FS_COPYFLAGS_MOVE) {
-            ::unlink(localPath.c_str());
+            if (::unlink(localPath.c_str()) != 0) {
+                // The mirror image of getFile's remote-delete failure,
+                // and the other path where FS_FILE_OK travels with a
+                // non-empty *error for FsPutFileW to report. The upload
+                // landed, so the code stays OK -- but the user asked for
+                // a move and the local file is still here, so saying
+                // nothing would leave them with a silent duplicate.
+                if (error != nullptr) {
+                    *error = std::string("uploaded, but failed to delete the local source "
+                                         "(copied, not moved): ") +
+                             std::strerror(errno);
+                }
+            }
         }
 
         return FS_FILE_OK;
@@ -694,6 +726,13 @@ public:
         return runMutatingShellCommand(rp, "mkdir -p " + shellQuote(rp.path), wfxRemote, error);
     }
 
+    // Double Commander funnels BOTH of its internal operations through
+    // the single FsRenMovFileW entry point: F6 inside one device arrives
+    // with move=true, F5 inside one device with move=false (a copy that
+    // never leaves the phone). Everything up to the branch at the bottom
+    // -- the cross-device rejection, the refuse-to-overwrite check -- is
+    // common to the two; only the last step differs.
+    //
     // crossDevice and targetExists, if non-null, are both cleared at the
     // start and each set to true only for its own specific failure --
     // "wfxFrom and wfxTo name different devices" for the former, "the
@@ -709,12 +748,6 @@ public:
     bool renameOrMove(const std::string& wfxFrom, const std::string& wfxTo, bool move,
                       bool overwrite, std::string* error, bool* crossDevice = nullptr,
                       bool* targetExists = nullptr) {
-        // A same-directory rename and a cross-directory move both land on
-        // the same "mv" against the device's single filesystem tree --
-        // the distinction only matters to Double Commander's UI, never to
-        // the shell command issued here.
-        (void)move;
-
         if (error != nullptr) {
             error->clear();
         }
@@ -735,7 +768,7 @@ public:
             // here). Reject explicitly rather than silently running mv
             // on the wrong device and reporting success.
             if (error != nullptr) {
-                *error = "cannot move between devices";
+                *error = move ? "cannot move between devices" : "cannot copy between devices";
             }
             if (crossDevice != nullptr) {
                 *crossDevice = true;
@@ -751,6 +784,9 @@ public:
             // transport gives no exit status to lean on, so the only
             // reliable way to honor "don't
             // overwrite" is to check first and never send -n at all.
+            // The same holds for "cp -n", and there it is worse still: a
+            // silently skipped copy leaves a stale file at the target
+            // that reads as the fresh one.
             DirEntry targetInfo;
             bool targetAlreadyExists = false;
             AdbError statErr =
@@ -772,27 +808,8 @@ public:
             }
         }
 
-        std::string command = "mv " + shellQuote(rpFrom.path) + " " + shellQuote(rpTo.path);
-
-        std::string output;
-        AdbError err = client_.shellCommand(rpFrom.serial, command, &output);
-        if (!err.ok) {
-            if (error != nullptr) {
-                *error = err.message;
-            }
-            return false;
-        }
-        std::string trimmed = plugincore_detail::trimTrailingNewlines(output);
-        if (!trimmed.empty()) {
-            if (error != nullptr) {
-                *error = trimmed;
-            }
-            return false;
-        }
-
-        invalidatePathAndParent(wfxFrom);
-        invalidatePathAndParent(wfxTo);
-        return true;
+        return move ? runDeviceMove(rpFrom, rpTo, wfxFrom, wfxTo, error)
+                    : runDeviceCopy(rpFrom, rpTo, wfxTo, error);
     }
 
     bool setModificationTime(const std::string& wfxRemote, int64_t mtime, std::string* error,
@@ -1019,6 +1036,126 @@ private:
             r.isDir = e.isNavigableDir();
             out->push_back(std::move(r));
         }
+    }
+
+    // A same-directory rename and a cross-directory move both land on
+    // this one "mv" against the device's single filesystem tree -- the
+    // distinction only matters to Double Commander's UI, never to the
+    // shell command issued here. Both ends of the move change, so both
+    // ends' cached listings go.
+    bool runDeviceMove(const RemotePath& rpFrom, const RemotePath& rpTo,
+                       const std::string& wfxFrom, const std::string& wfxTo, std::string* error) {
+        std::string command = "mv " + shellQuote(rpFrom.path) + " " + shellQuote(rpTo.path);
+
+        std::string output;
+        AdbError err = client_.shellCommand(rpFrom.serial, command, &output);
+        if (!err.ok) {
+            if (error != nullptr) {
+                *error = err.message;
+            }
+            return false;
+        }
+        std::string trimmed = plugincore_detail::trimTrailingNewlines(output);
+        if (!trimmed.empty()) {
+            if (error != nullptr) {
+                *error = trimmed;
+            }
+            return false;
+        }
+
+        invalidatePathAndParent(wfxFrom);
+        invalidatePathAndParent(wfxTo);
+        return true;
+    }
+
+    // A copy that never leaves the phone: "cp" plus an explicit stamp of
+    // the source's date onto the result.
+    //
+    // Why not "cp -p", which would do both in one round trip: -p
+    // preserves ownership as well as timestamps, and inside /sdcard the
+    // shell user cannot chown -- so cp prints a complaint. On a transport
+    // with no exit status, "printed something" is the ONLY failure signal
+    // there is, so every copy to the most common destination on the phone
+    // would report a failure. Sending "touch" ourselves keeps the date --
+    // the headline requirement of this project -- in code that is already
+    // hardened (setModificationTime's "-d @epoch" rejection fallback) and
+    // already exercised against real hardware, instead of delegating it
+    // to whichever cp the device happens to ship.
+    //
+    // The source's mtime is its own lstat date, deliberately NOT resolved
+    // through a symlink the way getFile does it: there is no progress
+    // total to match here, and the lstat date is exactly what Double
+    // Commander shows for the source row.
+    //
+    // Only wfxTo's cached listing is dropped (runMutatingShellCommand
+    // does it): a copy leaves the source directory untouched, and
+    // evicting it would throw away the listing of the very panel the user
+    // is copying from.
+    bool runDeviceCopy(const RemotePath& rpFrom, const RemotePath& rpTo, const std::string& wfxTo,
+                       std::string* error) {
+        // Cheap insurance against a cp that truncates the target before
+        // noticing it is the source: that would destroy the file being
+        // copied. Textual only -- "a/./b", trailing slashes and symlink
+        // aliases still rely on cp's own same-file detection.
+        if (rpFrom.path == rpTo.path) {
+            if (error != nullptr) {
+                *error = "cannot copy a file onto itself: " + rpFrom.path;
+            }
+            return false;
+        }
+
+        DirEntry source;
+        bool exists = false;
+        AdbError statErr = client_.syncStat(rpFrom.serial, rpFrom.path, &source, &exists);
+        if (!statErr.ok) {
+            if (error != nullptr) {
+                *error = statErr.message;
+            }
+            return false;
+        }
+        if (!exists) {
+            if (error != nullptr) {
+                *error = "cannot copy " + rpFrom.path + ": no such file or directory";
+            }
+            return false;
+        }
+        if (source.isDir()) {
+            // Double Commander walks a directory itself (FsMkDirW, then
+            // one FsRenMovFileW per file), so this is unreachable through
+            // its UI. It is refused rather than served with "cp -r"
+            // because -r offers no per-file date control at all: every
+            // file in the tree would land stamped "now".
+            if (error != nullptr) {
+                *error = "cannot copy a directory on the device: " + rpFrom.path;
+            }
+            return false;
+        }
+
+        std::string command = "cp " + shellQuote(rpFrom.path) + " " + shellQuote(rpTo.path);
+        if (!runMutatingShellCommand(rpFrom, command, wfxTo, error)) {
+            return false;
+        }
+
+        // setModificationTime STATs the target before touching it, which
+        // doubles as the only confirmation available in a protocol with
+        // no exit status that cp produced anything at all.
+        std::string stampError;
+        if (!setModificationTime(wfxTo, source.mtime, &stampError)) {
+            // The bytes landed but the date is wrong -- exactly the
+            // silently-wrong mtime this project exists to eliminate, so
+            // it is a failure, and the message has to name both facts.
+            // The target is deliberately NOT deleted the way getFile
+            // unlinks a badly-stamped download: here the source always
+            // survives, and under overwrite the target may be a file the
+            // user asked to replace, so deleting it would turn a wrong
+            // date into actual data loss.
+            if (error != nullptr) {
+                *error = "copied, but failed to set the copy's modification time: " +
+                         (stampError.empty() ? std::string("unknown error") : stampError);
+            }
+            return false;
+        }
+        return true;
     }
 
     bool runMutatingShellCommand(const RemotePath& rp, const std::string& command,

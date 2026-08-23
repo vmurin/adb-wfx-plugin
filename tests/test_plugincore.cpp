@@ -1060,12 +1060,55 @@ TEST(GetFileSuite, moveFlagDeletesRemoteFileAfterSuccessfulDownload) {
                                &error);
 
     CHECK_EQ(result, FS_FILE_OK);
+    CHECK(error.empty()); // a move that fully succeeded has nothing to say
     CHECK_EQ(factory.callCount(), 3);
 
     std::string expectedDeleteWritten =
         encodeHostRequest("host:transport:SERIAL1") +
         encodeHostRequest("shell:rm -f " + shellQuote("/sdcard/photo.jpg"));
     CHECK_STR_EQ(deleteWritten, expectedDeleteWritten);
+}
+
+TEST(GetFileSuite, moveWhoseRemoteDeleteFailsStillReturnsOkAndSaysSo) {
+    TestTempDir dir;
+    std::string localPath = dir.path() + "/moved.bin";
+    std::string content = "abc";
+    uint32_t remoteMtime = 1600000000;
+
+    std::string statScript = "OKAY" "OKAY" "STAT" +
+        encodeStatBody(0100644, static_cast<uint32_t>(content.size()), remoteMtime);
+    std::string recvScript = "OKAY" "OKAY" +
+        syncHeaderBytes("DATA", static_cast<uint32_t>(content.size())) + content +
+        syncHeaderBytes("DONE", 0);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(recvScript, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(
+        std::string("OKAY" "OKAY") + "rm: /sdcard/photo.jpg: Permission denied\n", nullptr, nullptr));
+
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    ProgressFn progress = [](uint64_t, uint64_t) { return true; };
+    std::string error;
+    int result = core.getFile("/SERIAL1/sdcard/photo.jpg", localPath, FS_COPYFLAGS_MOVE, progress,
+                               &error);
+
+    // The download itself succeeded and the local file is complete and
+    // correctly stamped, so the code must stay FS_FILE_OK -- an error
+    // code here would make Double Commander treat a good transfer as a
+    // failed one. But the user asked for a move and got a copy: the
+    // source is still on the phone, and that cannot pass in silence.
+    CHECK_EQ(result, FS_FILE_OK);
+    CHECK_EQ(factory.callCount(), 3);
+    CHECK(error.find("Permission denied") != std::string::npos); // the device's own words
+    CHECK(error.find("delete") != std::string::npos);            // ... and what it means
+    CHECK_STR_EQ(readFile(localPath), content);
+
+    struct stat st{};
+    CHECK_EQ(::stat(localPath.c_str(), &st), 0);
+    CHECK_EQ(static_cast<int64_t>(st.st_mtime), static_cast<int64_t>(remoteMtime));
 }
 
 TEST(GetFileSuite, downloadToANewTargetIsWrittenDirectlyUnderItsFinalName) {
@@ -1354,7 +1397,42 @@ TEST(PutFileSuite, moveFlagDeletesLocalFileAfterSuccessfulUpload) {
                                FS_COPYFLAGS_OVERWRITE | FS_COPYFLAGS_MOVE, progress, &error);
 
     CHECK_EQ(result, FS_FILE_OK);
+    CHECK(error.empty()); // a move that fully succeeded has nothing to say
     CHECK_EQ(dir.entryCount(), static_cast<size_t>(0)); // local file removed after the move
+}
+
+TEST(PutFileSuite, moveWhoseLocalDeleteFailsStillReturnsOkAndSaysSo) {
+    TestTempDir dir;
+    std::string localPath = dir.path() + "/toMove.bin";
+    std::string content = "xyz";
+    writeFile(localPath, content);
+
+    std::string script = "OKAY" "OKAY" + syncHeaderBytes("OKAY", 0);
+    auto transport = std::make_unique<RecordingTransport>(script, nullptr, nullptr);
+    AdbClient client(singleUseFactory(std::move(transport)));
+    PluginCore core(client);
+
+    // unlink() consults the *directory's* permissions, not the file's, so
+    // a read-only parent is how a local delete is made to fail on demand
+    // while the upload itself (stat + open for reading) still works.
+    CHECK_EQ(::chmod(dir.path().c_str(), 0555), 0);
+
+    ProgressFn progress = [](uint64_t, uint64_t) { return true; };
+    std::string error;
+    int result = core.putFile(localPath, "/SERIAL1/sdcard/toMove.bin",
+                               FS_COPYFLAGS_OVERWRITE | FS_COPYFLAGS_MOVE, progress, &error);
+
+    CHECK_EQ(::chmod(dir.path().c_str(), 0700), 0); // before TestTempDir tries to clean up
+
+    // Mirror image of the getFile case: the upload really did land on the
+    // device, so the code stays FS_FILE_OK -- but the user asked for a
+    // move and the local copy is still here, which must not pass in
+    // silence.
+    CHECK_EQ(result, FS_FILE_OK);
+    CHECK(error.find("delete") != std::string::npos);
+    CHECK(error.find("local") != std::string::npos);
+    CHECK_EQ(dir.entryCount(), static_cast<size_t>(1)); // the local file survived
+    CHECK_STR_EQ(readFile(localPath), content);
 }
 
 TEST(PutFileSuite, cancelledUploadInvalidatesCache) {
@@ -1537,7 +1615,7 @@ TEST(ShellMutationSuite, renameOrMoveWithoutOverwriteChecksTargetFirstThenSendsP
     PluginCore core(client);
 
     std::string error;
-    CHECK(core.renameOrMove(wfxFrom, wfxTo, /*move=*/false, /*overwrite=*/false, &error));
+    CHECK(core.renameOrMove(wfxFrom, wfxTo, /*move=*/true, /*overwrite=*/false, &error));
     CHECK_EQ(factory.callCount(), 2);
 
     std::string expectedWritten =
@@ -1561,7 +1639,7 @@ TEST(ShellMutationSuite, renameOrMoveWithoutOverwriteAndExistingTargetFailsWitho
     PluginCore core(client);
 
     std::string error;
-    bool ok = core.renameOrMove(wfxFrom, wfxTo, /*move=*/false, /*overwrite=*/false, &error);
+    bool ok = core.renameOrMove(wfxFrom, wfxTo, /*move=*/true, /*overwrite=*/false, &error);
 
     CHECK(!ok);
     CHECK(!error.empty());
@@ -1655,7 +1733,7 @@ TEST(ShellMutationSuite, renameOrMoveWithoutOverwriteAndExistingTargetSetsTarget
 
     std::string error;
     bool targetExists = false;
-    bool ok = core.renameOrMove(wfxFrom, wfxTo, /*move=*/false, /*overwrite=*/false, &error,
+    bool ok = core.renameOrMove(wfxFrom, wfxTo, /*move=*/true, /*overwrite=*/false, &error,
                                 /*crossDevice=*/nullptr, &targetExists);
 
     CHECK(!ok);
@@ -1692,6 +1770,288 @@ TEST(ShellMutationSuite, renameOrMoveCrossDeviceLeavesTargetExistsFalse) {
 
     CHECK(!ok);
     CHECK(!targetExists);
+}
+
+// ---------------------------------------------------------------------
+// renameOrMove with move=false -- a copy that stays on the device
+//
+// Double Commander drives BOTH of its internal operations through the
+// single FsRenMovFileW entry point: F6 inside one device arrives with
+// Move=true, F5 inside one device with Move=false. The flag used to be
+// ignored here, so a copy ran "mv" and the source file vanished. These
+// tests pin the copy branch down to the exact bytes on the wire.
+// ---------------------------------------------------------------------
+
+TEST(CopyOnDeviceSuite, moveFalseCopiesTheFileInsteadOfDestroyingTheSource) {
+    // The regression test for that data loss: what goes out must be "cp",
+    // and the source must never appear as an argument to anything that
+    // removes it.
+    std::string serial = "SERIAL1";
+    std::string fromPath = std::string(TRICKY_REMOTE_PATH);
+    std::string toPath = "/sdcard/DCIM/copy.jpg";
+    std::string wfxFrom = "/" + serial + fromPath;
+    std::string wfxTo = "/" + serial + toPath;
+    int64_t sourceMtime = 981173106; // 2001-02-03 04:05:06 UTC
+
+    std::string sourceStat =
+        "OKAY" "OKAY" "STAT" + encodeStatBody(0100644, 1234, static_cast<uint32_t>(sourceMtime));
+
+    std::string cpWritten;
+    std::string touchWritten;
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(sourceStat, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), &cpWritten, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(fileStatScript(), nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), &touchWritten, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    CHECK(core.renameOrMove(wfxFrom, wfxTo, /*move=*/false, /*overwrite=*/true, &error));
+    CHECK(error.empty());
+    CHECK_EQ(factory.callCount(), 4);
+
+    // Byte-exact: no "mv", and no -r/-n/-p either. -p would drag
+    // ownership along, which on /sdcard produces a warning -- and any
+    // output at all reads as failure on a transport with no exit status.
+    std::string expectedCp = encodeHostRequest("host:transport:" + serial) +
+        encodeHostRequest("shell:cp " + shellQuote(fromPath) + " " + shellQuote(toPath));
+    CHECK_STR_EQ(cpWritten, expectedCp);
+
+    // The headline requirement, applied to copies: the new file carries
+    // the SOURCE's date, not the moment the copy ran -- and the stamp
+    // lands on the target.
+    std::string expectedTouch = encodeHostRequest("host:transport:" + serial) +
+        encodeHostRequest("shell:touch -c -d @" + std::to_string(sourceMtime) + " " +
+                          shellQuote(toPath));
+    CHECK_STR_EQ(touchWritten, expectedTouch);
+}
+
+TEST(CopyOnDeviceSuite, copyReusesTheTouchTFallbackWhenTheDeviceRejectsDashD) {
+    // Proof that the copy stamps through setModificationTime rather than
+    // growing a second, unhardened touch implementation beside it: the
+    // "-d @epoch" rejection fallback comes along for free.
+    std::string serial = "SERIAL1";
+    std::string fromPath = "/sdcard/DCIM/a.jpg";
+    std::string toPath = "/sdcard/DCIM/b.jpg";
+    int64_t sourceMtime = 1000000000; // 2001-09-09 01:46:40 UTC
+
+    std::string sourceStat =
+        "OKAY" "OKAY" "STAT" + encodeStatBody(0100644, 10, static_cast<uint32_t>(sourceMtime));
+
+    std::string touchTWritten;
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(sourceStat, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(fileStatScript(), nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(
+        std::string("OKAY" "OKAY") + "touch: unrecognized option '-d'\n", nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), &touchTWritten, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    CHECK(core.renameOrMove("/" + serial + fromPath, "/" + serial + toPath, /*move=*/false,
+                            /*overwrite=*/true, &error));
+    CHECK(error.empty());
+    CHECK_EQ(factory.callCount(), 5);
+
+    std::string expected = encodeHostRequest("host:transport:" + serial) +
+        encodeHostRequest("shell:TZ=UTC touch -c -t 200109090146.40 " + shellQuote(toPath));
+    CHECK_STR_EQ(touchTWritten, expected);
+}
+
+TEST(CopyOnDeviceSuite, copyWithoutOverwriteRefusesAnExistingTargetWithoutRunningCp) {
+    // "cp -n" is banned for the same reason "mv -n" is -- it skips
+    // silently and prints nothing, which this transport cannot tell from
+    // a copy that happened. For a copy it is the worse of the two: the
+    // stale file left at the target reads as the fresh copy.
+    std::string wfxFrom = "/SERIAL1/sdcard/a.jpg";
+    std::string wfxTo = "/SERIAL1/sdcard/existing.jpg";
+    std::string statScript = "OKAY" "OKAY" "STAT" + encodeStatBody(0100644, 10, 1600000000);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    bool crossDevice = true; // deliberately pre-set to the wrong value
+    bool targetExists = false;
+    bool ok = core.renameOrMove(wfxFrom, wfxTo, /*move=*/false, /*overwrite=*/false, &error,
+                                &crossDevice, &targetExists);
+
+    CHECK(!ok);
+    CHECK(targetExists);
+    CHECK(!crossDevice);
+    CHECK_EQ(factory.callCount(), 1); // no source stat, no cp
+}
+
+TEST(CopyOnDeviceSuite, copyWithoutOverwriteChecksTheTargetFirstThenCopies) {
+    std::string serial = "SERIAL1";
+    std::string fromPath = "/sdcard/DCIM/a.jpg";
+    std::string toPath = "/sdcard/DCIM/b.jpg";
+
+    QueueFactory factory;
+    std::string cpWritten;
+    factory.push(std::make_unique<RecordingTransport>(
+        std::string("OKAY" "OKAY") + "STAT" + encodeStatBody(0, 0, 0), nullptr, nullptr)); // target absent
+    factory.push(std::make_unique<RecordingTransport>(
+        std::string("OKAY" "OKAY") + "STAT" + encodeStatBody(0100644, 10, 1600000000), nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), &cpWritten, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(fileStatScript(), nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    CHECK(core.renameOrMove("/" + serial + fromPath, "/" + serial + toPath, /*move=*/false,
+                            /*overwrite=*/false, &error));
+    CHECK_EQ(factory.callCount(), 5);
+
+    std::string expectedCp = encodeHostRequest("host:transport:" + serial) +
+        encodeHostRequest("shell:cp " + shellQuote(fromPath) + " " + shellQuote(toPath));
+    CHECK_STR_EQ(cpWritten, expectedCp);
+}
+
+TEST(CopyOnDeviceSuite, copyFailureFromTheDeviceIsSurfacedAndNoStampIsAttempted) {
+    std::string sourceStat = "OKAY" "OKAY" "STAT" + encodeStatBody(0100644, 10, 1600000000);
+    std::string cpFailure =
+        std::string("OKAY" "OKAY") + "cp: '/sdcard/DCIM/b.jpg': Permission denied\n";
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(sourceStat, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(cpFailure, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    bool crossDevice = true;   // deliberately pre-set to the wrong values
+    bool targetExists = true;
+    bool ok = core.renameOrMove("/SERIAL1/sdcard/DCIM/a.jpg", "/SERIAL1/sdcard/DCIM/b.jpg",
+                                /*move=*/false, /*overwrite=*/true, &error, &crossDevice,
+                                &targetExists);
+
+    CHECK(!ok);
+    CHECK_STR_EQ(error, "cp: '/sdcard/DCIM/b.jpg': Permission denied");
+    CHECK_EQ(factory.callCount(), 2); // nothing was stamped after a copy that did not happen
+    CHECK(!crossDevice);
+    CHECK(!targetExists);
+}
+
+TEST(CopyOnDeviceSuite, copyOfADirectoryIsRefusedBeforeAnyShellCommand) {
+    // Double Commander walks directories itself (FsMkDirW, then one
+    // FsRenMovFileW per file), so this is unreachable through the UI --
+    // but "cp -r" would stamp every file in the tree with "now", which is
+    // the exact defect this project exists to eliminate. Refuse instead,
+    // using the source stat the copy already needs.
+    std::string dirStat = "OKAY" "OKAY" "STAT" + encodeStatBody(0040755, 4096, 1600000000);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(dirStat, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    bool ok = core.renameOrMove("/SERIAL1/sdcard/DCIM", "/SERIAL1/sdcard/DCIM2", /*move=*/false,
+                                /*overwrite=*/true, &error);
+
+    CHECK(!ok);
+    CHECK(error.find("directory") != std::string::npos);
+    CHECK_EQ(factory.callCount(), 1);
+}
+
+TEST(CopyOnDeviceSuite, copyOfAMissingSourceIsRefusedBeforeAnyShellCommand) {
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(
+        std::string("OKAY" "OKAY") + "STAT" + encodeStatBody(0, 0, 0), nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    bool ok = core.renameOrMove("/SERIAL1/sdcard/gone.jpg", "/SERIAL1/sdcard/b.jpg",
+                                /*move=*/false, /*overwrite=*/true, &error);
+
+    CHECK(!ok);
+    CHECK(error.find("no such file or directory") != std::string::npos);
+    CHECK_EQ(factory.callCount(), 1);
+}
+
+TEST(CopyOnDeviceSuite, copyOntoItselfIsRefusedWithoutTouchingTheDevice) {
+    // Cheap insurance against a cp that truncates its target before
+    // noticing the two paths are the same file: that would destroy the
+    // very file being copied.
+    bool factoryCalled = false;
+    TransportFactory factory = [&](std::string*) -> std::unique_ptr<Transport> {
+        factoryCalled = true;
+        return nullptr;
+    };
+    AdbClient client(factory);
+    PluginCore core(client);
+
+    std::string error;
+    bool ok = core.renameOrMove("/SERIAL1/sdcard/a.jpg", "/SERIAL1/sdcard/a.jpg", /*move=*/false,
+                                /*overwrite=*/true, &error);
+
+    CHECK(!ok);
+    CHECK(!factoryCalled);
+    CHECK(!error.empty());
+}
+
+TEST(CopyOnDeviceSuite, copyThatLandsButCannotBeStampedFailsLoudly) {
+    // The bytes are there but the date is wrong, which is precisely the
+    // silently-wrong mtime this project refuses to ship. Report it. The
+    // target is deliberately NOT deleted the way getFile unlinks a
+    // badly-stamped download: here the source always survives, and under
+    // overwrite the target may be a file the user asked to replace.
+    std::string sourceStat = "OKAY" "OKAY" "STAT" + encodeStatBody(0100644, 10, 1000000000);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(sourceStat, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(fileStatScript(), nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(
+        std::string("OKAY" "OKAY") + "touch: unrecognized option '-d'\n", nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(
+        std::string("OKAY" "OKAY") + "touch: still no good\n", nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    bool crossDevice = true; // deliberately pre-set to the wrong values
+    bool targetExists = true;
+    bool ok = core.renameOrMove("/SERIAL1/sdcard/a.jpg", "/SERIAL1/sdcard/b.jpg", /*move=*/false,
+                                /*overwrite=*/true, &error, &crossDevice, &targetExists);
+
+    CHECK(!ok);
+    CHECK(error.find("copied") != std::string::npos);        // the bytes did land
+    CHECK(error.find("touch: still no good") != std::string::npos); // the device's own words
+    CHECK(!crossDevice);
+    CHECK(!targetExists);
+}
+
+TEST(CopyOnDeviceSuite, copyAcrossDevicesIsRejectedWithItsOwnMessage) {
+    // Same rejection as a cross-device move, but the message must say
+    // "copy" -- and for a copy, FS_FILE_NOTSUPPORTED is a genuinely
+    // useful answer: Double Commander's download+upload fallback really
+    // can finish the job.
+    bool factoryCalled = false;
+    TransportFactory factory = [&](std::string*) -> std::unique_ptr<Transport> {
+        factoryCalled = true;
+        return nullptr;
+    };
+    AdbClient client(factory);
+    PluginCore core(client);
+
+    std::string error;
+    bool crossDevice = false;
+    bool ok = core.renameOrMove("/DEVICE_A/a", "/DEVICE_B/b", /*move=*/false, /*overwrite=*/true,
+                                &error, &crossDevice);
+
+    CHECK(!ok);
+    CHECK(crossDevice);
+    CHECK(!factoryCalled);
+    CHECK_STR_EQ(error, "cannot copy between devices");
 }
 
 TEST(ShellMutationSuite, setModificationTimeSendsExactQuotedTouchDCommand) {

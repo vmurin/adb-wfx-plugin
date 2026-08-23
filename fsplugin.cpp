@@ -186,9 +186,15 @@ WFX_EXPORT int DCPCALL FsGetFileW(WCHAR* remoteName, WCHAR* localName, int copyF
         int result = gPluginCore->getFile(
             wfxRemote, localPath, copyFlags,
             makeProgressFn(gProgressProcW, gPluginNr, remoteName, localName), &error);
-        if (result != FS_FILE_OK) {
-            reportError(gLogProcW, gPluginNr, error); // empty for USERABORT/EXISTS/NOTFOUND: no-op
-        }
+        // Unconditional, not gated on the result code: a move whose
+        // download succeeded but whose delete-on-the-device failed comes
+        // back as FS_FILE_OK *with* a message, and that message is the
+        // only way the user learns the file is still on the phone.
+        // reportError is a no-op on an empty message (USERABORT, EXISTS,
+        // NOTFOUND and every ordinary success), and getFile clears *error
+        // on entry and sets it on no other success path -- keep it that
+        // way, or a future success message starts raising error dialogs.
+        reportError(gLogProcW, gPluginNr, error);
         return result;
     } catch (...) {
         return FS_FILE_READERROR;
@@ -206,9 +212,12 @@ WFX_EXPORT int DCPCALL FsPutFileW(WCHAR* localName, WCHAR* remoteName, int copyF
         int result = gPluginCore->putFile(
             localPath, wfxRemote, copyFlags,
             makeProgressFn(gProgressProcW, gPluginNr, localName, remoteName), &error);
-        if (result != FS_FILE_OK) {
-            reportError(gLogProcW, gPluginNr, error); // empty for USERABORT/EXISTS: no-op
-        }
+        // Unconditional for the same reason as in FsGetFileW above: an
+        // upload whose delete-of-the-local-source failed comes back as
+        // FS_FILE_OK with a message, and that message is the only way the
+        // user learns the file is still on the computer. reportError is a
+        // no-op on an empty message (USERABORT, EXISTS, ordinary success).
+        reportError(gLogProcW, gPluginNr, error);
         return result;
     } catch (...) {
         return FS_FILE_WRITEERROR;
@@ -233,6 +242,10 @@ WFX_EXPORT int DCPCALL FsRenMovFileW(WCHAR* oldName, WCHAR* newName, BOOL move, 
             return FS_FILE_OK;
         }
         reportError(gLogProcW, gPluginNr, error);
+        // One mapping serves both halves of this entry point: Double
+        // Commander sends move=true for an F6 inside one device and
+        // move=false for an F5 there (a copy that stays on the phone).
+        //
         // A refused overwrite maps to FS_FILE_EXISTS -- the same code
         // getFile/putFile already return for the identical situation
         // (wfxplugin.h defines it for exactly "target exists and
@@ -241,7 +254,8 @@ WFX_EXPORT int DCPCALL FsRenMovFileW(WCHAR* oldName, WCHAR* newName, BOOL move, 
         // cross-device before ever reaching the overwrite check). A
         // cross-device rejection maps to FS_FILE_NOTSUPPORTED, telling DC
         // to fall back to its own get+put+delete emulation -- the one
-        // remaining failure mode that fallback can actually fix. Every
+        // remaining failure mode that fallback can actually fix (and for
+        // a cross-device copy it really can finish the job). Every
         // other failure (a shell error, a dropped transport) maps to
         // FS_FILE_WRITEERROR instead: retrying the identical operation as
         // a download+upload+delete would not fix a genuine error, and for

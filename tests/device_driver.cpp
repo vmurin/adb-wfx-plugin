@@ -71,6 +71,7 @@ void printUsage() {
         "  rm <wfxpath>\n"
         "  rmdir <wfxpath>\n"
         "  mv <wfxfrom> <wfxto> [overwrite(0|1)]\n"
+        "  cp <wfxfrom> <wfxto> [overwrite(0|1)]\n"
         "  settime <wfxremote> <epochSeconds>\n"
         "  settime-t <wfxremote> <epochSeconds>\n"
         "  cachettl <wfxdir> <sleep1Seconds> <sleep2Seconds>\n"
@@ -355,12 +356,16 @@ int cmdRmdir(AdbClient& client, const std::string& wfxPath) {
     return EXIT_OK;
 }
 
-int cmdMv(AdbClient& client, const std::string& wfxFrom, const std::string& wfxTo, bool overwrite) {
+// Drives both halves of the one SDK entry point Double Commander uses
+// for its internal operations: move=true is what F6 sends inside a
+// device, move=false what F5 sends (a copy that stays on the phone).
+int cmdRenMov(AdbClient& client, const std::string& wfxFrom, const std::string& wfxTo, bool move,
+              bool overwrite) {
     PluginCore core(client);
     std::string error;
     bool crossDevice = false;
     bool targetExists = false;
-    bool ok = core.renameOrMove(wfxFrom, wfxTo, /*move=*/true, overwrite, &error, &crossDevice,
+    bool ok = core.renameOrMove(wfxFrom, wfxTo, move, overwrite, &error, &crossDevice,
                                 &targetExists);
     if (!ok) {
         std::cerr << "ERROR: " << error << "\n";
@@ -479,13 +484,13 @@ int main(int argc, char** argv) {
             }
             return cmdRmdir(*client, argv[2]);
         }
-        if (command == "mv") {
+        if (command == "mv" || command == "cp") {
             if (argc < 4 || argc > 5) {
                 printUsage();
                 return EXIT_USAGE;
             }
             int64_t overwrite = parseOptionalInt(argc, argv, 4, 0);
-            return cmdMv(*client, argv[2], argv[3], overwrite != 0);
+            return cmdRenMov(*client, argv[2], argv[3], /*move=*/command == "mv", overwrite != 0);
         }
         if (command == "settime" || command == "settime-t") {
             if (argc != 4) {

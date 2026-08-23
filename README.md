@@ -68,7 +68,7 @@ Devices then appear as directories under a virtual `ADB` root, named
 - Browsing the device's filesystem.
 - Uploading and downloading files with the real modification time preserved
   in both directions.
-- Delete, rename/move (within one device), create directory.
+- Delete, rename/move and copy (within one device), create directory.
 - Setting a file's modification date from Double Commander's own "change
   date" UI (`FsSetTimeW`).
 - Filenames containing spaces, quotes, and non-ASCII (e.g. Cyrillic)
@@ -109,12 +109,20 @@ against a real Android device (see [Testing](#testing)).
   protocol offers nothing to tell that apart from a directory that really is
   empty. A path that does not exist, or that is a file rather than a
   directory, *is* reported properly.
-- **A narrow rename/move race.** Refusing to overwrite an existing target
-  (when "overwrite" isn't requested) is implemented as "check whether the
-  target exists, then `mv`" — there is a brief window between the check and
-  the move in which something else on the device could create the target,
-  and the move would then silently overwrite it. The device's shell offers
-  no atomic "rename unless it exists" primitive to close that window with.
+- **Move (F6) to or from a local disk is refused by Double Commander
+  itself.** Moving files from the device to a local folder, or from a local
+  folder to the device, is rejected with "Function not implemented" before
+  this plugin is asked to do anything — as is a move between two attached
+  devices. Copying (F5) works in both directions, and rename/move *within*
+  one device works normally; to move to or from the device, copy and then
+  delete.
+- **A narrow rename/move/copy race.** Refusing to overwrite an existing
+  target (when "overwrite" isn't requested) is implemented as "check whether
+  the target exists, then `mv` (or `cp`)" — there is a brief window between
+  the check and the operation in which something else on the device could
+  create the target, and it would then silently be overwritten. The device's
+  shell offers no atomic "rename unless it exists" primitive to close that
+  window with.
 
 ## The `FsSetTimeW` gotcha
 
@@ -144,8 +152,9 @@ project's release checks.
   same core the plugin itself uses. Covers device discovery, directory
   creation and listing, upload/download with a fixed mtime, unusual
   filenames (spaces, apostrophes, Cyrillic, and literal shell
-  metacharacters), `settime`, cancelling a large transfer partway in both
-  directions, and cleanup. Every on-device path it touches lives under
+  metacharacters), an on-device copy that keeps the source and its date,
+  `settime`, cancelling a large transfer partway in both directions, and
+  cleanup. Every on-device path it touches lives under
   `/sdcard/adb_wfx_test/`, and it removes that directory when it finishes.
   With no device attached it prints a clear message and exits with a
   distinct code (42).
