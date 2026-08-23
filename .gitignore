@@ -1,0 +1,5 @@
+*.wfx64
+*.o
+build/
+tests/bin/
+.DS_Store
