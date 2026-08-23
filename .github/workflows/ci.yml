@@ -19,8 +19,14 @@ jobs:
         include:
           - name: macOS 14 (arm64)
             runner: macos-14
-          - name: macOS 13 (x86_64)
-            runner: macos-13
+          # The last x86_64 macOS image Actions offers: macos-13 was retired in
+          # December 2025, and macos-15-intel goes away in autumn 2027, after
+          # which GitHub hosts no Intel macOS at all. The universal build still
+          # produces an x86_64 slice regardless of which runner made it; what
+          # this leg buys is *running* the suite on Intel rather than only
+          # compiling for it.
+          - name: macOS 15 (x86_64)
+            runner: macos-15-intel
           - name: Linux (x86_64)
             runner: ubuntu-22.04
           - name: Linux (aarch64)
