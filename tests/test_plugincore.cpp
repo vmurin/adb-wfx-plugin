@@ -1542,6 +1542,32 @@ TEST(ShellMutationSuite, setModificationTimeReturnsFalseWhenBothFormsFail) {
     CHECK_STR_EQ(error, "touch: still no good");
 }
 
+TEST(ShellMutationSuite, touchTOnlyStrategySkipsTheDashDAttemptAndSendsTheTzPrefixedForm) {
+    // The -t fallback is where the TZ=UTC correctness lives, and on a
+    // device whose toybox touch accepts -d it is otherwise unreachable.
+    // TouchStrategy::TouchTOnly is how tests/device_test.sh gets at it.
+    std::string serial = "SERIAL1";
+    std::string path = "/sdcard/DCIM/a.jpg";
+    int64_t mtime = 1000000000; // 2001-09-09 01:46:40 UTC
+
+    QueueFactory factory;
+    std::string written;
+    factory.push(std::make_unique<RecordingTransport>(fileStatScript(), nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(std::string("OKAY" "OKAY"), &written, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::string error;
+    CHECK(core.setModificationTime("/" + serial + path, mtime, &error,
+                                   TouchStrategy::TouchTOnly));
+    CHECK(error.empty());
+    CHECK_EQ(factory.callCount(), 2); // the STAT and one touch, no -d attempt
+
+    std::string tCommand = "TZ=UTC touch -c -t 200109090146.40 " + shellQuote(path);
+    CHECK_STR_EQ(written, encodeHostRequest("host:transport:" + serial) +
+                              encodeHostRequest("shell:" + tCommand));
+}
+
 TEST(ShellMutationSuite, setModificationTimeRefusesAPathThatDoesNotExist) {
     // `touch -c` exits 0 and prints nothing for a file that isn't there,
     // and this transport gives no exit status -- so without an existence

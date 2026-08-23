@@ -199,6 +199,106 @@ else
     fail "settime: remote mtime ($SETTIME_REMOTE_EPOCH) != expected ($SETTIME_EPOCH)"
 fi
 
+echo "=== Step 6b: the touch -t fallback (TZ correctness on a non-UTC phone) ==="
+# settime above may well have succeeded on the "-d @<epoch>" form, in
+# which case the "-t" fallback -- the one that has to be sent under
+# TZ=UTC, because touch -t reads its argument in the DEVICE's local time
+# -- was never exercised at all. settime-t forces it. If the TZ=UTC prefix
+# were missing, this step fails by exactly the phone's UTC offset, which
+# is the whole point of running it on a phone that is not set to UTC.
+FALLBACK_EPOCH="$(date -j -u -f "%Y-%m-%d %H:%M:%S" "2013-11-12 13:14:15" "+%s")"
+"$DRIVER" settime-t "$ONEMIB_REMOTE_WFX" "$FALLBACK_EPOCH" >/dev/null
+FALLBACK_REMOTE_EPOCH="$(remote_stat_mtime "$ONEMIB_REMOTE_PATH")"
+if [ "$FALLBACK_REMOTE_EPOCH" = "$FALLBACK_EPOCH" ]; then
+    pass "touch -t fallback set remote mtime to $FALLBACK_EPOCH"
+else
+    OFFSET=$((FALLBACK_REMOTE_EPOCH - FALLBACK_EPOCH))
+    fail "touch -t fallback: remote mtime ($FALLBACK_REMOTE_EPOCH) != expected ($FALLBACK_EPOCH), off by ${OFFSET}s -- is the TZ=UTC prefix missing?"
+fi
+
+echo "=== Step 6c: a nonexistent directory is an error, not an empty listing ==="
+# adbd answers a failed opendir() with an empty DONE, never a FAIL, so
+# without an explicit STAT this reads as a successful empty directory and
+# Double Commander shows a blank panel with no message.
+set +e
+MISSING_OUT="$("$DRIVER" list "$WFX_ROOT/definitely_not_here" 2>&1)"
+MISSING_EXIT=$?
+set -e
+if [ "$MISSING_EXIT" -ne 0 ]; then
+    case "$MISSING_OUT" in
+        *"no such file or directory"*)
+            pass "listing a nonexistent directory failed with a clear message"
+            ;;
+        *)
+            fail "listing a nonexistent directory failed, but without a clear message: $MISSING_OUT"
+            ;;
+    esac
+else
+    fail "listing a nonexistent directory succeeded (as an empty listing): $MISSING_OUT"
+fi
+
+echo "=== Step 6d: /sdcard is a symlink and must still open as a directory ==="
+# lstat() reports /sdcard as mode 0120777 on every modern device; if the
+# plugin classifies it by that alone, the most common destination on the
+# phone renders as a 21-byte file and cannot be opened at all.
+SDCARD_LIST="$("$DRIVER" list "/$SERIAL/sdcard")"
+if [ -n "$SDCARD_LIST" ]; then
+    pass "/sdcard opens as a directory and lists $(echo "$SDCARD_LIST" | wc -l | tr -d ' ') entries"
+else
+    fail "/sdcard listed as empty -- is the symlink being treated as a file?"
+fi
+# ... and the device root must show it AS a directory (trailing field 1).
+ROOT_LIST="$("$DRIVER" list "/$SERIAL")"
+SDCARD_ROW="$(echo "$ROOT_LIST" | awk -F'\t' '$1=="sdcard"{print; exit}')"
+if [ -z "$SDCARD_ROW" ]; then
+    fail "no 'sdcard' entry in the device root listing"
+fi
+case "$SDCARD_ROW" in
+    *$'\t'1) pass "device root lists 'sdcard' as a directory" ;;
+    *) fail "device root lists 'sdcard' as a file: $SDCARD_ROW" ;;
+esac
+
+echo "=== Step 6e: the listing cache holds briefly, then expires ==="
+# One driver process, one PluginCore, one cache. A file is pushed into
+# $TEST_ROOT from outside while the driver sleeps between its first and
+# second listing: the second must still show the OLD count (the cache is
+# genuinely serving) and the third the NEW one (the TTL genuinely
+# elapsed). Before the TTL existed, the third count matched the first and
+# a photo taken on the phone never appeared until DC was restarted.
+CACHE_PROBE_LOCAL="$LOCAL_SCRATCH/cache_probe.bin"
+dd if=/dev/urandom of="$CACHE_PROBE_LOCAL" bs=1024 count=1 >/dev/null 2>&1
+CACHE_PROBE_PATH="$TEST_ROOT/cache_probe.bin"
+assert_under_test_root "$CACHE_PROBE_PATH"
+# Timing, against LISTING_CACHE_TTL_SECONDS = 5: the driver lists at
+# t=0, t=4 (still fresh) and t=8 (expired), and the push lands at t~2.
+# It therefore assumes the driver reaches its first listing within two
+# seconds of being started, which it does against an adb server
+# require_device has already warmed up.
+(
+    sleep 2
+    "$ADB_BIN" -s "$SERIAL" push "$CACHE_PROBE_LOCAL" "$CACHE_PROBE_PATH" >/dev/null 2>&1
+) &
+CACHE_PUSH_PID=$!
+CACHE_OUT="$("$DRIVER" cachettl "$WFX_ROOT" 4 4)"
+wait "$CACHE_PUSH_PID" || true
+echo "$CACHE_OUT"
+CACHE_FIRST="$(echo "$CACHE_OUT" | awk '$1=="FIRST"{print $2}')"
+CACHE_CACHED="$(echo "$CACHE_OUT" | awk '$1=="CACHED"{print $2}')"
+CACHE_EXPIRED="$(echo "$CACHE_OUT" | awk '$1=="EXPIRED"{print $2}')"
+if [ -z "$CACHE_FIRST" ] || [ -z "$CACHE_CACHED" ] || [ -z "$CACHE_EXPIRED" ]; then
+    fail "cachettl did not print all three counts: $CACHE_OUT"
+fi
+if [ "$CACHE_CACHED" = "$CACHE_FIRST" ]; then
+    pass "the cache served the earlier listing ($CACHE_CACHED entries) while it was still fresh"
+else
+    fail "cached listing changed before the TTL: first=$CACHE_FIRST cached=$CACHE_CACHED"
+fi
+if [ "$CACHE_EXPIRED" -gt "$CACHE_FIRST" ]; then
+    pass "the cache expired and picked up the externally-added file ($CACHE_EXPIRED entries)"
+else
+    fail "cache never expired: first=$CACHE_FIRST expired=$CACHE_EXPIRED -- an externally-added file stayed invisible"
+fi
+
 echo "=== Step 7: cancellation of a large transfer ==="
 BIG_LOCAL="$LOCAL_SCRATCH/big.bin"
 BIG_SIZE_MB=200
@@ -248,6 +348,62 @@ fi
 # Best-effort: the partial file is inside TEST_ROOT and step 8's rm -rf
 # below removes it anyway; no separate cleanup needed here.
 assert_under_test_root "$BIG_REMOTE_PATH"
+
+echo "=== Step 7b: cancellation of a large DOWNLOAD ==="
+# Step 7 only covers the upload direction. Downloads cancel on a
+# different path (syncRecv, plus the temp-file-and-rename dance in
+# getFile), and the thing that must not happen is a truncated file left
+# sitting at the real target name looking like a complete copy.
+DL_LOCAL="$LOCAL_SCRATCH/dlsource.bin"
+DL_SIZE_MB=60
+DL_CANCEL_AFTER_BYTES=$((15 * 1024 * 1024))
+dd if=/dev/zero of="$DL_LOCAL" bs=1048576 count="$DL_SIZE_MB" >/dev/null 2>&1
+DL_REMOTE_WFX="$WFX_ROOT/dlsource.bin"
+DL_REMOTE_PATH="$TEST_ROOT/dlsource.bin"
+assert_under_test_root "$DL_REMOTE_PATH"
+"$DRIVER" put "$DL_LOCAL" "$DL_REMOTE_WFX" >/dev/null
+
+DL_TARGET="$LOCAL_SCRATCH/dl.cancelled.bin"
+DL_STDOUT="$LOCAL_SCRATCH/dlcancel.stdout"
+DL_STDERR="$LOCAL_SCRATCH/dlcancel.stderr"
+DL_START=$(date +%s)
+set +e
+"$DRIVER" get "$DL_REMOTE_WFX" "$DL_TARGET" "$DL_CANCEL_AFTER_BYTES" >"$DL_STDOUT" 2>"$DL_STDERR"
+GET_EXIT=$?
+set -e
+DL_ELAPSED=$(($(date +%s) - DL_START))
+DL_OUTPUT="$(cat "$DL_STDOUT")"
+
+echo "cancel get exit=$GET_EXIT elapsed=${DL_ELAPSED}s stdout=$DL_OUTPUT stderr=$(cat "$DL_STDERR")"
+case "$DL_OUTPUT" in
+    *ABORTED*)
+        if [ "$GET_EXIT" -eq 2 ]; then
+            pass "driver reported ABORTED (exit 2) for the cancelled download"
+        else
+            fail "driver printed ABORTED but exited $GET_EXIT (expected 2)"
+        fi
+        ;;
+    *)
+        fail "expected exit 2 / 'ABORTED' for the cancelled download, got exit=$GET_EXIT stdout='$DL_OUTPUT'"
+        ;;
+esac
+if [ -e "$DL_TARGET" ]; then
+    fail "a cancelled download left a file at $DL_TARGET -- a partial copy must never appear under the real name"
+else
+    pass "no file was left behind at the download target"
+fi
+# ... and no temp file either.
+LEFTOVER_TEMPS="$(find "$LOCAL_SCRATCH" -name 'dl.cancelled.bin.adbwfx.tmp.*' | wc -l | tr -d ' ')"
+if [ "$LEFTOVER_TEMPS" = "0" ]; then
+    pass "no temporary download file was left behind"
+else
+    fail "$LEFTOVER_TEMPS temporary download file(s) left behind in $LOCAL_SCRATCH"
+fi
+if [ "$DL_ELAPSED" -le 60 ]; then
+    pass "download cancellation was prompt (${DL_ELAPSED}s)"
+else
+    fail "download cancellation took too long (${DL_ELAPSED}s)"
+fi
 
 echo "=== Step 8: cleanup ==="
 assert_under_test_root "$TEST_ROOT"

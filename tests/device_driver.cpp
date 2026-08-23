@@ -73,6 +73,8 @@ void printUsage() {
         "  rmdir <wfxpath>\n"
         "  mv <wfxfrom> <wfxto> [overwrite(0|1)]\n"
         "  settime <wfxremote> <epochSeconds>\n"
+        "  settime-t <wfxremote> <epochSeconds>\n"
+        "  cachettl <wfxdir> <sleep1Seconds> <sleep2Seconds>\n"
         "\n"
         "wfxpath/wfxremote/wfxfrom/wfxto are WFX-style paths:\n"
         "  \"/<serial>/<on-device-absolute-path>\", e.g.\n"
@@ -84,7 +86,15 @@ void printUsage() {
         "\n"
         "putmany/getmany move every regular file of a directory in ONE\n"
         "process, over one PluginCore -- the shape `adb push`/`adb pull`\n"
-        "already have, and the only fair comparison for tests/bench.sh.\n";
+        "already have, and the only fair comparison for tests/bench.sh.\n"
+        "\n"
+        "settime-t forces the `touch -t` fallback that settime only\n"
+        "reaches when the device's touch rejects `-d @<epoch>`.\n"
+        "\n"
+        "cachettl lists <wfxdir> three times through ONE PluginCore,\n"
+        "sleeping between them, and prints a count each time -- so a\n"
+        "caller can change the directory from outside and see the cache\n"
+        "hold the old listing and then expire.\n";
 }
 
 // Builds the same AdbClient wiring FsInitW uses in fsplugin.cpp: find and
@@ -361,14 +371,43 @@ int cmdMv(AdbClient& client, const std::string& wfxFrom, const std::string& wfxT
     return EXIT_OK;
 }
 
-int cmdSettime(AdbClient& client, const std::string& wfxRemote, int64_t epoch) {
+int cmdSettime(AdbClient& client, const std::string& wfxRemote, int64_t epoch,
+               TouchStrategy strategy) {
     PluginCore core(client);
     std::string error;
-    if (!core.setModificationTime(wfxRemote, epoch, &error)) {
+    if (!core.setModificationTime(wfxRemote, epoch, &error, strategy)) {
         std::cerr << "ERROR: " << error << "\n";
         return EXIT_ERROR;
     }
     std::cout << "OK\n";
+    return EXIT_OK;
+}
+
+// Lists wfxDir three times through one PluginCore -- and therefore one
+// listing cache -- sleeping between them, printing "FIRST/CACHED/EXPIRED
+// <count>". A caller that changes the directory from outside during the
+// first sleep sees CACHED still report the old count (the cache is really
+// serving) and EXPIRED report the new one (the TTL really elapsed). Both
+// halves matter: a cache that never expired hid changes made on the phone
+// forever, and a cache that never hit would make browsing slow.
+int cmdCacheTtl(AdbClient& client, const std::string& wfxDir, unsigned sleep1, unsigned sleep2) {
+    PluginCore core(client);
+    const char* const LABELS[] = {"FIRST", "CACHED", "EXPIRED"};
+    const unsigned sleeps[] = {sleep1, sleep2, 0};
+    for (int i = 0; i < 3; ++i) {
+        std::vector<FindResult> entries;
+        std::string warning;
+        std::string error;
+        if (!core.listDirectory(wfxDir, &entries, &warning, &error)) {
+            std::cerr << "ERROR: " << error << "\n";
+            return EXIT_ERROR;
+        }
+        std::cout << LABELS[i] << " " << entries.size() << "\n";
+        std::cout.flush();
+        if (sleeps[i] > 0) {
+            ::sleep(sleeps[i]);
+        }
+    }
     return EXIT_OK;
 }
 
@@ -449,13 +488,29 @@ int main(int argc, char** argv) {
             int64_t overwrite = parseOptionalInt(argc, argv, 4, 0);
             return cmdMv(*client, argv[2], argv[3], overwrite != 0);
         }
-        if (command == "settime") {
+        if (command == "settime" || command == "settime-t") {
             if (argc != 4) {
                 printUsage();
                 return EXIT_USAGE;
             }
             int64_t epoch = parseOptionalInt(argc, argv, 3, 0);
-            return cmdSettime(*client, argv[2], epoch);
+            TouchStrategy strategy = (command == "settime-t") ? TouchStrategy::TouchTOnly
+                                                              : TouchStrategy::EpochThenFallback;
+            return cmdSettime(*client, argv[2], epoch, strategy);
+        }
+        if (command == "cachettl") {
+            if (argc != 5) {
+                printUsage();
+                return EXIT_USAGE;
+            }
+            int64_t sleep1 = parseOptionalInt(argc, argv, 3, 0);
+            int64_t sleep2 = parseOptionalInt(argc, argv, 4, 0);
+            if (sleep1 < 0 || sleep2 < 0) {
+                std::cerr << "device_driver: sleep seconds must not be negative\n";
+                return EXIT_USAGE;
+            }
+            return cmdCacheTtl(*client, argv[2], static_cast<unsigned>(sleep1),
+                                static_cast<unsigned>(sleep2));
         }
 
         printUsage();

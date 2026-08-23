@@ -311,6 +311,16 @@ inline bool formatTouchTArg(int64_t epochSeconds, std::string* out) {
 
 } // namespace plugincore_detail
 
+// Which touch form setModificationTime may use. Android's toybox touch
+// has historically rejected "-d @<epoch>", so the default tries that
+// first and falls back to "-t" only when it complains. TouchTOnly goes
+// straight to the fallback: on a device whose touch DOES accept -d that
+// is the only way to exercise the -t path at all, and the -t path is
+// where the whole TZ=UTC question lives -- an untested fallback that is
+// three hours wrong on a non-UTC phone is exactly what this project
+// cannot ship. tests/device_driver.cpp's "settime-t" selects it.
+enum class TouchStrategy { EpochThenFallback, TouchTOnly };
+
 class PluginCore {
 public:
     explicit PluginCore(AdbClient& client) : client_(client) {}
@@ -705,7 +715,8 @@ public:
         return true;
     }
 
-    bool setModificationTime(const std::string& wfxRemote, int64_t mtime, std::string* error) {
+    bool setModificationTime(const std::string& wfxRemote, int64_t mtime, std::string* error,
+                             TouchStrategy strategy = TouchStrategy::EpochThenFallback) {
         if (error != nullptr) {
             error->clear();
         }
@@ -735,18 +746,20 @@ public:
 
         std::string quoted = shellQuote(rp.path);
 
-        std::string epochCommand = "touch -c -d @" + std::to_string(mtime) + " " + quoted;
-        std::string epochOutput;
-        AdbError epochErr = client_.shellCommand(rp.serial, epochCommand, &epochOutput);
-        if (!epochErr.ok) {
-            if (error != nullptr) {
-                *error = epochErr.message;
+        if (strategy == TouchStrategy::EpochThenFallback) {
+            std::string epochCommand = "touch -c -d @" + std::to_string(mtime) + " " + quoted;
+            std::string epochOutput;
+            AdbError epochErr = client_.shellCommand(rp.serial, epochCommand, &epochOutput);
+            if (!epochErr.ok) {
+                if (error != nullptr) {
+                    *error = epochErr.message;
+                }
+                return false;
             }
-            return false;
-        }
-        if (plugincore_detail::trimTrailingNewlines(epochOutput).empty()) {
-            invalidatePathAndParent(wfxRemote);
-            return true;
+            if (plugincore_detail::trimTrailingNewlines(epochOutput).empty()) {
+                invalidatePathAndParent(wfxRemote);
+                return true;
+            }
         }
 
         // Fallback: Android's toybox touch has historically rejected the
