@@ -1,4 +1,8 @@
-# adb-wfx: an ADB file-system plugin for Double Commander
+# adb-wfx
+
+[![CI](https://github.com/vmurin/adb-wfx-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/vmurin/adb-wfx-plugin/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/vmurin/adb-wfx-plugin?sort=semver)](https://github.com/vmurin/adb-wfx-plugin/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A Double Commander [WFX file-system plugin](https://doublecmd.sourceforge.io/)
 that browses, copies, renames, and deletes files on an Android device over
@@ -22,46 +26,126 @@ when writing to the device and 1.7× faster when reading from it**, and with
 far less run-to-run variance. This plugin is built on ADB specifically to
 inherit that.
 
-## Building
+## Supported platforms
 
-Requires `clang++` with C++17 support.
+| Platform | Status |
+| --- | --- |
+| macOS, Apple silicon and Intel (universal binary) | Supported — hardware-confirmed on a Pixel 7 |
+| Linux x86_64 | Builds and passes the full unit suite in CI — **untested on real hardware** |
+| Linux aarch64 | Builds and passes the full unit suite in CI — **untested on real hardware** |
+| Windows / Total Commander | Not yet — see [Windows and Total Commander](#windows-and-total-commander) |
 
-```sh
-./compile_mac.sh
-```
+> **The Linux builds are untested on real hardware.** They compile cleanly and
+> pass all 900+ unit checks in CI on both architectures, but nobody has yet run
+> them against an actual Android device inside Double Commander — unlike the
+> macOS build, which is verified end to end on a real phone. Nothing is known to
+> be wrong with them; they simply have not been tried. If you run one, please
+> [open an issue](https://github.com/vmurin/adb-wfx-plugin/issues) saying whether
+> it worked. Reports of success are as useful as reports of failure.
 
-produces `fsplugin.wfx64`, a Mach-O shared library exporting the 14 symbols
-Double Commander's WFX interface requires (`FsInitW`, `FsFindFirstW`, ...,
-including `FsSetTimeW` — see [the FsSetTimeW gotcha](#the-fssettimew-gotcha)
-below).
-
-For a universal arm64 + x86_64 binary, use `./compile_mac_universal.sh`
-instead.
+You will also need `adb` installed. The plugin finds it through `$ADB_PATH`,
+your `PATH`, `$ANDROID_HOME` / `$ANDROID_SDK_ROOT`, and the usual Homebrew,
+Android Studio and distribution package locations.
 
 ## Installing
 
-1. Build the plugin, then run:
+Copying the plugin into place is **only half of the install**. Double Commander
+does not scan for plugins — it loads the ones listed in its own configuration,
+so step 4 below is required, not a fallback.
 
-   ```sh
-   ./scripts/install.sh
-   ```
+**1. Get the plugin.** Download the archive for your platform from
+[Releases](https://github.com/vmurin/adb-wfx-plugin/releases/latest) and unzip
+it, or build from source (see [Building](#building)).
 
-   It copies `fsplugin.wfx64` into Double Commander's plugin directory
-   (`.../Double Commander.app/Contents/MacOS/plugins/wfx/adb/`), creating
-   that subdirectory if needed and backing up any file already there to
-   `fsplugin.wfx64.bak-<timestamp>` first.
+**2. macOS only — clear the quarantine attribute.** Anything downloaded from the
+internet is quarantined, and macOS will not load a quarantined library into
+Double Commander:
 
-2. Quit Double Commander completely and relaunch it.
+```sh
+xattr -dr com.apple.quarantine fsplugin.wfx64
+```
 
-3. If the ADB file system doesn't appear automatically, open
-   **Configuration → Plugins → WFX plugins**, click **Add/Configure**, and
-   point it at the installed `fsplugin.wfx64`.
+**3. Put the file in place.**
 
-4. Enable USB debugging on the device and authorise the computer when the
-   phone prompts.
+```sh
+./install.sh          # from an unpacked release archive
+./scripts/install.sh  # from a source checkout
+```
 
-Devices then appear as directories under a virtual `ADB` root, named
+It copies `fsplugin.wfx64` into Double Commander's own configuration directory —
+`~/Library/Preferences/doublecmd/plugins/wfx/adb/` on macOS,
+`~/.config/doublecmd/plugins/wfx/adb/` on Linux — creating that subdirectory if
+needed and backing up any file already there first. It writes nowhere else.
+
+Installing into the configuration directory rather than into the application
+itself is deliberate: a plugin inside `Double Commander.app` (or `/usr/lib`) is
+wiped by the next update, and on macOS writing into the bundle invalidates its
+code signature.
+
+**4. Register it in Double Commander. This step is mandatory.**
+
+1. **Configuration → Options… → Plugins → WFX plugins**
+2. **Add**, and select the file that step 3 reported, e.g.
+   `~/Library/Preferences/doublecmd/plugins/wfx/adb/fsplugin.wfx64`
+3. Name it **`ADB`**, confirm with **OK**, then **Apply**.
+
+**5. Quit Double Commander completely and start it again.**
+
+**6. Open it.** **Commands → Open VFS list**, then choose **ADB**.
+
+**7. On the phone**, enable USB debugging and authorise this computer when it
+prompts.
+
+Devices then appear as directories under the `ADB` root, named
 `<model> (<serial>)` — for example `/<model> (<serial>)/sdcard/...`.
+
+### Checking that the registration took
+
+Double Commander records registered plugins in `doublecmd.xml`
+(`~/Library/Preferences/doublecmd/doublecmd.xml` on macOS,
+`~/.config/doublecmd/doublecmd.xml` on Linux). After step 4 it should contain:
+
+```xml
+<WfxPlugins>
+  <WfxPlugin Enabled="True">
+    <Name>ADB</Name>
+    <Path>%DC_CONFIG_PATH%/plugins/wfx/adb/fsplugin.wfx64</Path>
+  </WfxPlugin>
+</WfxPlugins>
+```
+
+`./scripts/install.sh --print-xml` prints that block if you would rather paste it
+in by hand. Edit the file only while Double Commander is closed — it rewrites
+`doublecmd.xml` on exit and will overwrite your change.
+
+### If something does not work
+
+| Symptom | Cause |
+| --- | --- |
+| No `ADB` entry in the VFS list | Step 4 was skipped, or Double Commander was not restarted. |
+| macOS: the plugin fails to load | The quarantine attribute is still set — step 2. |
+| `ADB` opens but lists no devices | The device is not visible to `adb` itself. Check `adb devices`, the USB cable, and that you accepted the authorisation prompt on the phone. |
+| "adb not found" | Set `ADB_PATH` to the full path of your `adb` binary. |
+| Dates are not preserved on copy | Double Commander's "copy file date" option is off, or an older build without `FsSetTimeW` is still registered — see [the `FsSetTimeW` gotcha](#the-fssettimew-gotcha). |
+
+## Building
+
+Requires a C++17 compiler — `clang++` on macOS, `g++` or `clang++` on Linux.
+There is nothing else to install.
+
+```sh
+./build.sh              # native build          -> fsplugin.wfx64
+./build.sh --universal  # macOS arm64 + x86_64  -> fsplugin.wfx64
+CXX=g++ ./build.sh      # pick the compiler
+```
+
+The result is a shared library exporting the 14 symbols Double Commander's WFX
+interface requires (`FsInitW`, `FsFindFirstW`, …, including `FsSetTimeW` — see
+[the `FsSetTimeW` gotcha](#the-fssettimew-gotcha) below) and nothing else;
+`./scripts/check-exports.sh` asserts both halves of that.
+
+`compile_mac.sh` and `compile_mac_universal.sh` still exist as thin wrappers
+around `build.sh`.
 
 ## What works
 
@@ -124,6 +208,18 @@ against a real Android device (see [Testing](#testing)).
   shell offers no atomic "rename unless it exists" primitive to close that
   window with.
 
+## Windows and Total Commander
+
+Neither is supported yet, and they are the same piece of work: Total Commander
+runs only on Windows, and Double Commander on Windows uses the same plugin
+binaries. The WFX API this plugin implements is Total Commander's own — no
+Double-Commander-specific extension is used — so a Windows build should serve
+both. What stands in the way is the host-side code: BSD sockets, `posix_spawn`
+and POSIX file calls all need Windows equivalents, and the local-file paths need
+to be handled as wide characters. See the
+[Windows support issue](https://github.com/vmurin/adb-wfx-plugin/issues) for the
+detailed analysis.
+
 ## The `FsSetTimeW` gotcha
 
 Double Commander decides whether to copy file dates **at all** — in *both*
@@ -137,14 +233,14 @@ direction this plugin's own code has no say in. See
 Because of this, `FsSetTimeW` must always be present in the exported symbol
 table regardless of whether "change date" is ever actually invoked from the
 UI. `scripts/check-exports.sh` and `tests/test_exports.cpp` both check for
-it by name, and `nm -gU fsplugin.wfx64 | grep FsSetTimeW` is one of this
-project's release checks.
+it by name, and it is one of this project's release checks.
 
 ## Testing
 
 - `./run_tests.sh` — the full unit suite, which needs no device. Builds the
   plugin, compiles and runs every `tests/test_*.cpp`, and checks the
-  exported symbol table. Ends with `ALL CHECKS PASSED`.
+  exported symbol table. Ends with `ALL CHECKS PASSED`. This is what CI runs
+  on macOS (arm64 and x86_64) and Linux (x86_64 and aarch64).
 
 - `ADB_WFX_DEVICE_TESTS=1 ./tests/device_test.sh` — an opt-in end-to-end
   test against a real, attached Android device. It drives the plugin
@@ -163,6 +259,16 @@ project's release checks.
   times `adb push`/`adb pull` of the whole corpus against this plugin's own
   put/get, 5 runs each, reporting the median in seconds and MB/s plus the
   plugin/adb ratio. Also requires an attached device.
+
+CI cannot attach a phone, so the last two are run by hand. The macOS build is
+confirmed against a Pixel 7; see [Supported platforms](#supported-platforms) for
+what that means for the Linux builds.
+
+## Contributing
+
+Bug reports, and especially reports from Linux users, are welcome. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for how to build, test and submit changes,
+and [SECURITY.md](SECURITY.md) for how to report a security issue.
 
 ## Licensing and credits
 
