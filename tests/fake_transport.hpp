@@ -5,7 +5,7 @@
 #ifndef ADB_WFX_TESTS_FAKE_TRANSPORT_HPP
 #define ADB_WFX_TESTS_FAKE_TRANSPORT_HPP
 
-#include "../transport.hpp"
+#include "transport.hpp"
 
 #include <cstring>
 #include <deque>

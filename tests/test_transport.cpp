@@ -2,10 +2,12 @@
 // scripted double Tasks 6-9 are built against). Written before either
 // header existed (TDD) -- see
 // .superpowers/sdd/plan-adb-wfx/task-5-report.md for the RED run.
-#include "../transport.hpp"
+#include "transport.hpp"
 #include "fake_transport.hpp"
 #include "testing.hpp"
 
+#include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -108,6 +110,79 @@ TEST(FakeTransportSuite, failWritesAfterBytesFailsSubsequentWrites) {
 
     CHECK(transport.writeAll("abc", 3));
     CHECK(!transport.writeAll("d", 1));
+}
+
+// ---------------------------------------------------------------------
+// transport_detail::loopTransfer -- the retry loop shared by writeAll and
+// readExactly, driven directly against a fake raw transfer function so the
+// multi-iteration and EINTR-retry paths are provably exercised (a
+// blocking socket send() can complete a 200000-byte write in one call, so
+// the real-socket tests below cannot prove the loop actually loops).
+// ---------------------------------------------------------------------
+
+TEST(LoopTransferSuite, accumulatesAcrossMultipleShortTransfers) {
+    std::vector<size_t> offsetsSeen;
+    auto raw = [&](size_t offset, size_t remaining) -> ptrdiff_t {
+        offsetsSeen.push_back(offset);
+        size_t chunk = std::min<size_t>(remaining, 3);
+        return static_cast<ptrdiff_t>(chunk);
+    };
+
+    bool ok = transport_detail::loopTransfer(raw, 10);
+
+    CHECK(ok);
+    std::vector<size_t> expected = {0, 3, 6, 9};
+    CHECK(offsetsSeen == expected);
+}
+
+TEST(LoopTransferSuite, eintrRetriesWithoutLosingOrDroppingProgress) {
+    std::vector<size_t> offsetsSeen;
+    int callCount = 0;
+    auto raw = [&](size_t offset, size_t remaining) -> ptrdiff_t {
+        offsetsSeen.push_back(offset);
+        ++callCount;
+        if (callCount == 2) {
+            errno = EINTR;
+            return -1;
+        }
+        size_t chunk = std::min<size_t>(remaining, 4);
+        return static_cast<ptrdiff_t>(chunk);
+    };
+
+    bool ok = transport_detail::loopTransfer(raw, 10);
+
+    CHECK(ok);
+    // call 1: offset 0, transfers 4 (done=4).
+    // call 2: offset 4, EINTR -- no progress, retried at the same offset.
+    // call 3: offset 4 again, transfers 4 (done=8).
+    // call 4: offset 8, transfers the remaining 2 (done=10).
+    std::vector<size_t> expected = {0, 4, 4, 8};
+    CHECK(offsetsSeen == expected);
+}
+
+TEST(LoopTransferSuite, nonEintrErrorStopsTheLoop) {
+    int callCount = 0;
+    auto raw = [&](size_t, size_t) -> ptrdiff_t {
+        ++callCount;
+        if (callCount == 1) {
+            return 3;
+        }
+        errno = EIO;
+        return -1;
+    };
+
+    bool ok = transport_detail::loopTransfer(raw, 10);
+
+    CHECK(!ok);
+    CHECK_EQ(callCount, 2);
+}
+
+TEST(LoopTransferSuite, zeroResultStopsTheLoop) {
+    auto raw = [](size_t, size_t) -> ptrdiff_t {
+        return 0;
+    };
+
+    CHECK(!transport_detail::loopTransfer(raw, 5));
 }
 
 // ---------------------------------------------------------------------

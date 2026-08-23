@@ -20,6 +20,42 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+namespace transport_detail {
+
+// One raw transfer attempt, with send()/recv() semantics: called with how
+// many bytes are already done and how many remain, it returns the number
+// of bytes transferred this attempt, 0 for EOF/closed, or -1 with errno
+// set (including EINTR, which loopTransfer below retries). Takes an
+// offset/remaining pair rather than a raw pointer so the loop can be
+// driven directly by a test with no real buffer at all.
+using RawTransferFn = std::function<ptrdiff_t(size_t offset, size_t remaining)>;
+
+// The retry loop shared by TcpTransport::writeAll and
+// TcpTransport::readExactly: drives `rawTransfer` until `n` bytes have
+// been moved in total, looping over partial transfers and retrying a
+// transfer that failed with EINTR. Stops and returns false on any other
+// error, or on a 0-byte result (EOF / peer closed) before n bytes are
+// done.
+inline bool loopTransfer(const RawTransferFn& rawTransfer, size_t n) {
+    size_t done = 0;
+    while (done < n) {
+        ptrdiff_t result = rawTransfer(done, n - done);
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if (result == 0) {
+            return false;
+        }
+        done += static_cast<size_t>(result);
+    }
+    return true;
+}
+
+} // namespace transport_detail
+
 class Transport {
 public:
     virtual ~Transport() = default;
@@ -34,7 +70,10 @@ public:
     virtual bool readExactly(void* buf, size_t n) = 0;
 
     // Reads up to n bytes in a single underlying call. Returns the number
-    // of bytes read, 0 on EOF, -1 on error.
+    // of bytes read, 0 on EOF, -1 on error (including EINTR -- readSome
+    // itself does not retry; that guarantee belongs to writeAll and
+    // readExactly, via their shared retry loop,
+    // transport_detail::loopTransfer).
     virtual ptrdiff_t readSome(void* buf, size_t n) = 0;
 
     virtual void close() = 0;
@@ -86,9 +125,15 @@ public:
 #ifdef SO_NOSIGPIPE
         // Darwin has no MSG_NOSIGNAL; this is the per-socket equivalent.
         // A broken pipe must never raise SIGPIPE and kill the host process
-        // (this code runs inside Double Commander, not a standalone binary).
+        // (this code runs inside Double Commander, not a standalone
+        // binary), so failing to install the guard fails the connection
+        // rather than silently running unprotected.
         int on = 1;
-        ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+        if (::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on)) != 0) {
+            setErrnoMessage(error, "setsockopt(SO_NOSIGPIPE)");
+            ::close(fd);
+            return nullptr;
+        }
 #endif
 
         return std::unique_ptr<TcpTransport>(new TcpTransport(fd));
@@ -96,50 +141,42 @@ public:
 
     bool writeAll(const void* buf, size_t n) override {
         const char* p = static_cast<const char*>(buf);
-        size_t sent = 0;
-        while (sent < n) {
-            ssize_t result = sendNoSignal(p + sent, n - sent);
-            if (result < 0) {
-                if (errno == EINTR) {
-                    continue;
+        bool ok = transport_detail::loopTransfer(
+            [this, p](size_t offset, size_t remaining) -> ptrdiff_t {
+                ssize_t result = sendNoSignal(p + offset, remaining);
+                if (result < 0) {
+                    if (errno != EINTR) {
+                        setErrnoMessage(&lastError_, "write");
+                    }
+                    return -1;
                 }
-                setErrnoMessage(&lastError_, "write");
-                return false;
-            }
-            if (result == 0) {
-                lastError_ = "write: connection closed";
-                return false;
-            }
-            sent += static_cast<size_t>(result);
-        }
-        return true;
+                if (result == 0) {
+                    lastError_ = "write: connection closed";
+                }
+                return static_cast<ptrdiff_t>(result);
+            },
+            n);
+        return ok;
     }
 
     bool readExactly(void* buf, size_t n) override {
         char* p = static_cast<char*>(buf);
-        size_t got = 0;
-        while (got < n) {
-            ptrdiff_t result = readSome(p + got, n - got);
-            if (result <= 0) {
-                return false;
-            }
-            got += static_cast<size_t>(result);
-        }
-        return true;
+        return transport_detail::loopTransfer(
+            [this, p](size_t offset, size_t remaining) {
+                return readSome(p + offset, remaining);
+            },
+            n);
     }
 
     ptrdiff_t readSome(void* buf, size_t n) override {
-        for (;;) {
-            ssize_t result = ::recv(fd_, buf, n, 0);
-            if (result < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
+        ssize_t result = ::recv(fd_, buf, n, 0);
+        if (result < 0) {
+            if (errno != EINTR) {
                 setErrnoMessage(&lastError_, "read");
-                return -1;
             }
-            return static_cast<ptrdiff_t>(result);
+            return -1;
         }
+        return static_cast<ptrdiff_t>(result);
     }
 
     void close() override {
