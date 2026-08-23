@@ -10,8 +10,9 @@
 // reportError, makeProgressFn, isWriteOperation, isUnsetFileTime) so they
 // are directly testable; this file only supplies its globals as their
 // arguments. Every actual decision -- device naming, caching, the
-// download-to-temp-then-rename dance, mtime preservation, which shell
-// commands the mutating operations run -- lives in PluginCore
+// download write scheme (direct, or temp-then-rename when
+// overwriting), mtime preservation, which shell commands the mutating
+// operations run -- lives in PluginCore
 // (fsplugin_impl.hpp). If a change here starts to look like a
 // policy decision rather than a translation, it belongs there instead.
 //

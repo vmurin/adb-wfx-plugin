@@ -416,8 +416,11 @@ if [ -e "$DL_TARGET" ]; then
 else
     pass "no file was left behind at the download target"
 fi
-# ... and no temp file either.
-LEFTOVER_TEMPS="$(find "$LOCAL_SCRATCH" -name 'dl.cancelled.bin.adbwfx.tmp.*' | wc -l | tr -d ' ')"
+# ... and no temp file either. A download to a target that does not exist
+# yet is written straight to its final name, so this glob should match
+# nothing on either count -- it still covers the dot-prefixed temp name
+# the overwrite path uses, in case that path is ever reached here.
+LEFTOVER_TEMPS="$(find "$LOCAL_SCRATCH" -name '*dl.cancelled.bin.adbwfx.tmp.*' | wc -l | tr -d ' ')"
 if [ "$LEFTOVER_TEMPS" = "0" ]; then
     pass "no temporary download file was left behind"
 else

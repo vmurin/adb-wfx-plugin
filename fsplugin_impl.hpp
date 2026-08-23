@@ -1,6 +1,7 @@
 // PluginCore: the WFX logic layer. Every decision the plugin makes --
-// device naming, caching, the download-to-temp-then-rename dance, mtime
-// preservation in both directions, and the shell commands used for the
+// device naming, caching, the download write scheme (direct, or
+// temp-then-rename when overwriting), mtime preservation in both
+// directions, and the shell commands used for the
 // mutating operations the sync protocol doesn't cover -- lives here, so
 // that fsplugin.cpp can be a mechanical extern "C" shim over it.
 // Works entirely in UTF-8 std::string; UTF-16 conversion is the shim's
@@ -237,11 +238,41 @@ constexpr char DISPLAY_NAME_SERIAL_CLOSE = ')';
 // "YYYYMMDDhhmm.ss\0" -- the buffer for touch -t's fallback argument.
 constexpr size_t TOUCH_T_TIMESTAMP_BUFFER_SIZE = 16;
 
-// A local file gets read/write owner-only permissions while it's still a
-// temp download -- rename() carries the final permissions decision (there
-// is none here; this plugin doesn't attempt to mirror POSIX file modes
-// onto the local macOS filesystem for downloads).
-constexpr mode_t TEMP_DOWNLOAD_FILE_MODE = S_IRUSR | S_IWUSR;
+// A downloaded file gets read/write owner-only permissions, whether it
+// was written straight to its final name or through a temp file that
+// rename() then carried into place (rename preserves the mode, so both
+// paths land on the same result). This plugin doesn't attempt to mirror
+// POSIX file modes onto the local macOS filesystem for downloads.
+constexpr mode_t DOWNLOAD_FILE_MODE = S_IRUSR | S_IWUSR;
+
+// The largest single path component (a bare file name, no directories)
+// the local filesystem accepts, in bytes -- NAME_MAX on APFS and HFS+.
+// Only tempDownloadPath needs it: it is the one place this plugin
+// invents a local name rather than using the one Double Commander
+// handed it.
+constexpr size_t MAX_FILE_NAME_BYTES = 255;
+
+// What tempDownloadPath appends before the pid. Named so the length
+// arithmetic that keeps the temp name inside MAX_FILE_NAME_BYTES cannot
+// drift away from the string it is measuring.
+constexpr const char* TEMP_DOWNLOAD_SUFFIX = ".adbwfx.tmp.";
+
+// The largest length not exceeding maxBytes at which s can be cut
+// without splitting a UTF-8 character in half. Backs up over
+// continuation bytes (10xxxxxx) to the start of the character they
+// belong to. Local file names on APFS are UTF-8, and half a character is
+// not a name worth asking it to store -- nor one a user could recognise
+// if a crash ever left it on disk.
+inline size_t utf8TruncatedLength(const std::string& s, size_t maxBytes) {
+    if (s.size() <= maxBytes) {
+        return s.size();
+    }
+    size_t n = maxBytes;
+    while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) {
+        --n;
+    }
+    return n;
+}
 
 // Trims a run of trailing '\n'/'\r' bytes. Android's shell: gives no exit
 // status on this transport, so "was there any output at all" is how
@@ -272,12 +303,40 @@ inline bool localFileExists(const std::string& path) {
     return ::stat(path.c_str(), &st) == 0;
 }
 
-// getFile downloads here first and rename()s it into place next to the
-// real target, so an interrupted transfer never leaves a truncated file
-// at the real name. The pid suffix is cheap insurance against two plugin
-// instances racing on the same target.
+// Where getFile downloads to when it is about to overwrite an existing
+// local file: the bytes land here and rename() carries them into place,
+// so a transfer that fails or is cancelled halfway leaves the previous
+// copy untouched instead of a truncated one. It has to sit in the same
+// directory as the target for that rename to be atomic (a different
+// directory could be a different volume, where rename fails outright),
+// which means a file manager watching that directory can see it -- hence
+// the leading dot, which keeps it out of any panel not showing hidden
+// files. The pid suffix is cheap insurance against two plugin instances
+// racing on the same target.
+//
+// Downloads to a name that does not exist yet skip this entirely and are
+// written straight to the final name; see getFile.
 inline std::string tempDownloadPath(const std::string& localPath) {
-    return localPath + ".adbwfx.tmp." + std::to_string(::getpid());
+    size_t slash = localPath.find_last_of('/');
+    std::string dir = (slash == std::string::npos) ? std::string() : localPath.substr(0, slash + 1);
+    std::string base = (slash == std::string::npos) ? localPath : localPath.substr(slash + 1);
+
+    // The dot and the suffix make the temp component longer than the
+    // target's own name, so a target whose name already sits near the
+    // filesystem's per-component limit would produce a temp name open()
+    // rejects with ENAMETOOLONG -- failing an overwrite that has nothing
+    // wrong with it. Shorten the middle to fit; the pid suffix, not the
+    // (possibly truncated) name, is what keeps the temp name distinct,
+    // and the file exists only until the rename.
+    std::string suffix = std::string(TEMP_DOWNLOAD_SUFFIX) + std::to_string(::getpid());
+    size_t budget = (MAX_FILE_NAME_BYTES > suffix.size() + 1)
+                        ? MAX_FILE_NAME_BYTES - suffix.size() - 1 // -1 for the leading dot
+                        : 0;
+    if (base.size() > budget) {
+        base.resize(utf8TruncatedLength(base, budget));
+    }
+
+    return dir + "." + base + suffix;
 }
 
 // Formats mtime (seconds since the Unix epoch) as touch -t's
@@ -457,16 +516,35 @@ public:
             }
         }
 
-        if (!(copyFlags & FS_COPYFLAGS_OVERWRITE) && plugincore_detail::localFileExists(localPath)) {
+        bool targetExists = plugincore_detail::localFileExists(localPath);
+        if (!(copyFlags & FS_COPYFLAGS_OVERWRITE) && targetExists) {
             return FS_FILE_EXISTS;
         }
 
-        std::string tempPath = plugincore_detail::tempDownloadPath(localPath);
-        int fd = ::open(tempPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC,
-                         plugincore_detail::TEMP_DOWNLOAD_FILE_MODE);
+        // Two ways to write the download, picked by what is at stake.
+        //
+        // Nothing at the target name: write straight to it. There is no
+        // previous copy for a failed transfer to destroy, and every
+        // failure path below unlinks what it wrote, so the only file that
+        // can survive under the real name is a complete one. This keeps a
+        // file manager's panel from flashing a temp name that exists for
+        // the length of the copy and then disappears, which is what the
+        // user actually sees on every download.
+        //
+        // A file already at the target name (overwrite): go through the
+        // temp file and rename() it into place, so a transfer that fails
+        // or is cancelled halfway leaves the existing copy intact. That
+        // guarantee is worth more than a hidden entry in the panel, and
+        // tempDownloadPath's leading dot keeps even that out of sight.
+        const bool viaTempFile = targetExists;
+        const std::string writePath =
+            viaTempFile ? plugincore_detail::tempDownloadPath(localPath) : localPath;
+
+        int fd = ::open(writePath.c_str(), O_WRONLY | O_CREAT | O_TRUNC,
+                         plugincore_detail::DOWNLOAD_FILE_MODE);
         if (fd < 0) {
             if (error != nullptr) {
-                *error = std::string("failed to create temporary file: ") + std::strerror(errno);
+                *error = std::string("failed to create local file: ") + std::strerror(errno);
             }
             return FS_FILE_WRITEERROR;
         }
@@ -475,7 +553,10 @@ public:
         ::close(fd);
 
         if (!recvErr.ok) {
-            ::unlink(tempPath.c_str());
+            // Removes the temp file, or -- on the direct path -- the
+            // partial file sitting under the real name, which must never
+            // be left behind masquerading as a complete download.
+            ::unlink(writePath.c_str());
             if (recvErr.message == ADB_CANCELLED) {
                 return FS_FILE_USERABORT;
             }
@@ -485,9 +566,9 @@ public:
             return FS_FILE_READERROR;
         }
 
-        if (::rename(tempPath.c_str(), localPath.c_str()) != 0) {
+        if (viaTempFile && ::rename(writePath.c_str(), localPath.c_str()) != 0) {
             std::string renameError = std::strerror(errno);
-            ::unlink(tempPath.c_str());
+            ::unlink(writePath.c_str());
             if (error != nullptr) {
                 *error = "failed to move downloaded file into place: " + renameError;
             }
@@ -496,7 +577,7 @@ public:
 
         // The headline requirement of the entire project: the local
         // file's mtime comes from the remote, not from the moment the
-        // download finished. Set on the final path, after the rename, so
+        // download finished. Set on the final path, after any rename, so
         // rename() (which does not touch mtime on this filesystem) can
         // never race it away.
         struct timespec times[2];

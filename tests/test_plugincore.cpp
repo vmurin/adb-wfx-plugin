@@ -9,6 +9,7 @@
 #include "fake_transport.hpp"
 #include "testing.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -144,6 +145,27 @@ public:
 
     const std::string& path() const {
         return path_;
+    }
+
+    // Every directory entry other than "." and "..", sorted. Used by the
+    // getFile tests to assert on the *names* visible mid-transfer, which
+    // is the whole point of the direct-write/hidden-temp scheme: what a
+    // file manager's panel would show while the copy is running.
+    std::vector<std::string> entryNames() const {
+        std::vector<std::string> names;
+        DIR* dir = ::opendir(path_.c_str());
+        if (dir != nullptr) {
+            struct dirent* entry;
+            while ((entry = ::readdir(dir)) != nullptr) {
+                std::string name = entry->d_name;
+                if (name != "." && name != "..") {
+                    names.push_back(name);
+                }
+            }
+            ::closedir(dir);
+        }
+        std::sort(names.begin(), names.end());
+        return names;
     }
 
     // Number of directory entries other than "." and "..". Used to prove
@@ -1046,6 +1068,215 @@ TEST(GetFileSuite, moveFlagDeletesRemoteFileAfterSuccessfulDownload) {
     CHECK_STR_EQ(deleteWritten, expectedDeleteWritten);
 }
 
+TEST(GetFileSuite, downloadToANewTargetIsWrittenDirectlyUnderItsFinalName) {
+    TestTempDir dir;
+    std::string localPath = dir.path() + "/photo.jpg";
+    std::string chunk1(1000, 'A');
+    std::string chunk2(1000, 'B');
+    std::string content = chunk1 + chunk2;
+
+    std::string statScript = "OKAY" "OKAY" "STAT" +
+        encodeStatBody(0100644, static_cast<uint32_t>(content.size()), 1600000000);
+    std::string recvScript = "OKAY" "OKAY" +
+        syncHeaderBytes("DATA", static_cast<uint32_t>(chunk1.size())) + chunk1 +
+        syncHeaderBytes("DATA", static_cast<uint32_t>(chunk2.size())) + chunk2 +
+        syncHeaderBytes("DONE", 0);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(recvScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    // What a file manager's panel would show halfway through the copy.
+    std::vector<std::string> midFlight;
+    ProgressFn progress = [&](uint64_t, uint64_t) {
+        if (midFlight.empty()) {
+            midFlight = dir.entryNames();
+        }
+        return true;
+    };
+    std::string error;
+    int result = core.getFile("/SERIAL1/sdcard/photo.jpg", localPath, 0, progress, &error);
+
+    CHECK_EQ(result, FS_FILE_OK);
+    // The point of the whole scheme: no temp name is ever visible for a
+    // download to a target that does not exist yet -- the file is written
+    // straight to its final name, so the panel never flashes a
+    // ".adbwfx.tmp." entry that then vanishes.
+    CHECK_EQ(midFlight.size(), static_cast<size_t>(1));
+    if (midFlight.size() == 1) {
+        CHECK_STR_EQ(midFlight[0], "photo.jpg");
+    }
+    CHECK_STR_EQ(readFile(localPath), content);
+    CHECK_EQ(dir.entryCount(), static_cast<size_t>(1));
+}
+
+TEST(GetFileSuite, overwriteDownloadsThroughAHiddenTempFileAndKeepsTheOldOneUntilDone) {
+    TestTempDir dir;
+    std::string localPath = dir.path() + "/existing.bin";
+    std::string originalContent = "the previous copy";
+    writeFile(localPath, originalContent);
+    std::string chunk1(1000, 'A');
+    std::string chunk2(1000, 'B');
+    std::string content = chunk1 + chunk2;
+
+    std::string statScript = "OKAY" "OKAY" "STAT" +
+        encodeStatBody(0100644, static_cast<uint32_t>(content.size()), 1600000000);
+    std::string recvScript = "OKAY" "OKAY" +
+        syncHeaderBytes("DATA", static_cast<uint32_t>(chunk1.size())) + chunk1 +
+        syncHeaderBytes("DATA", static_cast<uint32_t>(chunk2.size())) + chunk2 +
+        syncHeaderBytes("DONE", 0);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(recvScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::vector<std::string> midFlight;
+    std::string targetContentMidFlight;
+    ProgressFn progress = [&](uint64_t, uint64_t) {
+        if (midFlight.empty()) {
+            midFlight = dir.entryNames();
+            targetContentMidFlight = readFile(localPath);
+        }
+        return true;
+    };
+    std::string error;
+    int result = core.getFile("/SERIAL1/sdcard/existing.bin", localPath, FS_COPYFLAGS_OVERWRITE,
+                               progress, &error);
+
+    CHECK_EQ(result, FS_FILE_OK);
+    // Overwriting is the one case that still needs a temp file: the
+    // existing copy must survive a transfer that fails halfway. It stays
+    // untouched until the rename, and the temp name is dot-prefixed so a
+    // panel that hides hidden files never shows it.
+    CHECK_STR_EQ(targetContentMidFlight, originalContent);
+    CHECK_EQ(midFlight.size(), static_cast<size_t>(2));
+    if (midFlight.size() == 2) {
+        CHECK_STR_EQ(midFlight[1], "existing.bin");
+        CHECK(midFlight[0][0] == '.');
+        CHECK(midFlight[0].find(".adbwfx.tmp.") != std::string::npos);
+    }
+    CHECK_STR_EQ(readFile(localPath), content);
+    CHECK_EQ(dir.entryCount(), static_cast<size_t>(1)); // temp renamed into place, not left behind
+}
+
+TEST(GetFileSuite, cancelledOverwriteLeavesTheExistingFileIntact) {
+    TestTempDir dir;
+    std::string localPath = dir.path() + "/existing.bin";
+    std::string originalContent = "the previous copy";
+    writeFile(localPath, originalContent);
+    std::string chunk1(1000, 'A');
+    std::string chunk2(1000, 'B');
+
+    std::string statScript = "OKAY" "OKAY" "STAT" + encodeStatBody(0100644, 2000, 1600000000);
+    std::string recvScript = "OKAY" "OKAY" +
+        syncHeaderBytes("DATA", static_cast<uint32_t>(chunk1.size())) + chunk1 +
+        syncHeaderBytes("DATA", static_cast<uint32_t>(chunk2.size())) + chunk2 +
+        syncHeaderBytes("DONE", 0);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(recvScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    ProgressFn progress = [](uint64_t, uint64_t) { return false; };
+    std::string error;
+    int result = core.getFile("/SERIAL1/sdcard/existing.bin", localPath, FS_COPYFLAGS_OVERWRITE,
+                               progress, &error);
+
+    CHECK_EQ(result, FS_FILE_USERABORT);
+    // A cancelled overwrite must not destroy what was already there --
+    // this is exactly what the temp file buys, and why the overwrite path
+    // keeps it.
+    CHECK_STR_EQ(readFile(localPath), originalContent);
+    CHECK_EQ(dir.entryCount(), static_cast<size_t>(1)); // the temp file is gone
+}
+
+TEST(GetFileSuite, overwritingADotFileWorksThroughADoubleDotTempName) {
+    TestTempDir dir;
+    std::string localPath = dir.path() + "/.bashrc";
+    std::string originalContent = "the previous dotfile";
+    writeFile(localPath, originalContent);
+    std::string chunk1(1000, 'A');
+    std::string chunk2(1000, 'B');
+    std::string content = chunk1 + chunk2;
+
+    std::string statScript = "OKAY" "OKAY" "STAT" +
+        encodeStatBody(0100644, static_cast<uint32_t>(content.size()), 1600000000);
+    std::string recvScript = "OKAY" "OKAY" +
+        syncHeaderBytes("DATA", static_cast<uint32_t>(chunk1.size())) + chunk1 +
+        syncHeaderBytes("DATA", static_cast<uint32_t>(chunk2.size())) + chunk2 +
+        syncHeaderBytes("DONE", 0);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(recvScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    std::vector<std::string> midFlight;
+    ProgressFn progress = [&](uint64_t, uint64_t) {
+        if (midFlight.empty()) {
+            midFlight = dir.entryNames();
+        }
+        return true;
+    };
+    std::string error;
+    int result = core.getFile("/SERIAL1/sdcard/.bashrc", localPath, FS_COPYFLAGS_OVERWRITE,
+                               progress, &error);
+
+    // A target whose name already starts with a dot gets a temp name
+    // starting with two ("..bashrc.adbwfx.tmp.<pid>"). Only the exact
+    // strings "." and ".." are special to the filesystem, so this is an
+    // ordinary -- and still hidden -- name.
+    CHECK_EQ(result, FS_FILE_OK);
+    CHECK(error.empty());
+    CHECK_EQ(midFlight.size(), static_cast<size_t>(2));
+    if (midFlight.size() == 2) {
+        CHECK(midFlight[0].rfind("..bashrc.adbwfx.tmp.", 0) == 0);
+        CHECK_STR_EQ(midFlight[1], ".bashrc");
+    }
+    CHECK_STR_EQ(readFile(localPath), content);
+    CHECK_EQ(dir.entryCount(), static_cast<size_t>(1));
+}
+
+TEST(GetFileSuite, overwritingAFileWhoseNameNearlyFillsNameMaxStillSucceeds) {
+    TestTempDir dir;
+    // 250 bytes: adding ".adbwfx.tmp.<pid>" and a leading dot to this
+    // would overrun the filesystem's 255-byte limit on one path
+    // component, so tempDownloadPath has to shorten it.
+    std::string longName(250, 'x');
+    std::string localPath = dir.path() + "/" + longName;
+    writeFile(localPath, "the previous copy");
+    std::string content = "fresh bytes";
+
+    std::string statScript = "OKAY" "OKAY" "STAT" +
+        encodeStatBody(0100644, static_cast<uint32_t>(content.size()), 1600000000);
+    std::string recvScript = "OKAY" "OKAY" +
+        syncHeaderBytes("DATA", static_cast<uint32_t>(content.size())) + content +
+        syncHeaderBytes("DONE", 0);
+
+    QueueFactory factory;
+    factory.push(std::make_unique<RecordingTransport>(statScript, nullptr, nullptr));
+    factory.push(std::make_unique<RecordingTransport>(recvScript, nullptr, nullptr));
+    AdbClient client(factory.asFactory());
+    PluginCore core(client);
+
+    ProgressFn progress = [](uint64_t, uint64_t) { return true; };
+    std::string error;
+    int result = core.getFile("/SERIAL1/sdcard/long.bin", localPath, FS_COPYFLAGS_OVERWRITE,
+                               progress, &error);
+
+    CHECK_EQ(result, FS_FILE_OK);
+    CHECK(error.empty());
+    CHECK_STR_EQ(readFile(localPath), content);
+    CHECK_EQ(dir.entryCount(), static_cast<size_t>(1));
+}
+
 // ---------------------------------------------------------------------
 // putFile
 // ---------------------------------------------------------------------
@@ -1628,6 +1859,98 @@ TEST(ResumeSuite, putFileRejectsResumeWithoutTouchingTheDevice) {
 
     CHECK_EQ(result, FS_FILE_NOTSUPPORTED);
     CHECK_EQ(factory.callCount(), 0);
+}
+
+// ---------------------------------------------------------------------
+// tempDownloadPath
+// ---------------------------------------------------------------------
+
+// The name of the last path component, i.e. what a file manager's panel
+// would show for it.
+std::string baseNameOf(const std::string& path) {
+    size_t slash = path.find_last_of('/');
+    return (slash == std::string::npos) ? path : path.substr(slash + 1);
+}
+
+// Whether every byte sequence in s is a well-formed UTF-8 encoding.
+// Truncating a name to fit NAME_MAX must not cut a multi-byte character
+// in half: APFS stores filenames as UTF-8 and a half-character is not a
+// name it should ever be asked to store.
+bool isValidUtf8(const std::string& s) {
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        size_t len = 0;
+        if (c < 0x80) {
+            len = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            len = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            len = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            len = 4;
+        } else {
+            return false; // a continuation byte or an invalid lead byte
+        }
+        if (i + len > s.size()) {
+            return false; // truncated mid-character
+        }
+        for (size_t k = 1; k < len; ++k) {
+            if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) {
+                return false;
+            }
+        }
+        i += len;
+    }
+    return true;
+}
+
+TEST(TempDownloadPathSuite, sitsNextToTheTargetUnderAHiddenName) {
+    std::string temp = plugincore_detail::tempDownloadPath("/some/dir/photo.jpg");
+    CHECK(temp.rfind("/some/dir/.photo.jpg.adbwfx.tmp.", 0) == 0);
+}
+
+TEST(TempDownloadPathSuite, aTargetWithNoDirectoryPartKeepsItsRelativeName) {
+    std::string temp = plugincore_detail::tempDownloadPath("photo.jpg");
+    CHECK(temp.rfind(".photo.jpg.adbwfx.tmp.", 0) == 0);
+    CHECK(temp.find('/') == std::string::npos);
+}
+
+TEST(TempDownloadPathSuite, aDotFileGetsASecondDotAndIsNeverBareDotOrDotDot) {
+    std::string temp = plugincore_detail::tempDownloadPath("/some/dir/.bashrc");
+    std::string base = baseNameOf(temp);
+    CHECK(base.rfind("..bashrc.adbwfx.tmp.", 0) == 0);
+    CHECK(base != ".");
+    CHECK(base != "..");
+}
+
+TEST(TempDownloadPathSuite, anOverlongTargetNameIsShortenedToFitNameMax) {
+    std::string longName(300, 'x');
+    std::string base = baseNameOf(plugincore_detail::tempDownloadPath("/some/dir/" + longName));
+
+    // Without shortening this component would be 300 + 18 bytes and
+    // open() would fail with ENAMETOOLONG, taking the whole overwrite
+    // down with it.
+    CHECK(base.size() <= plugincore_detail::MAX_FILE_NAME_BYTES);
+    CHECK(base[0] == '.');
+    CHECK(base.find(".adbwfx.tmp.") != std::string::npos);
+}
+
+TEST(TempDownloadPathSuite, shorteningNeverSplitsAMultiByteCharacter) {
+    std::string longName;
+    for (int i = 0; i < 200; ++i) {
+        longName += "\xD1\x84"; // U+0444 CYRILLIC SMALL LETTER EF, 2 bytes
+    }
+    std::string base = baseNameOf(plugincore_detail::tempDownloadPath("/some/dir/" + longName));
+
+    CHECK(base.size() <= plugincore_detail::MAX_FILE_NAME_BYTES);
+    CHECK(isValidUtf8(base));
+}
+
+TEST(TempDownloadPathSuite, aTargetNameThatAlreadyFitsIsNotShortened) {
+    std::string name(200, 'x');
+    std::string base = baseNameOf(plugincore_detail::tempDownloadPath("/some/dir/" + name));
+    CHECK(base.rfind("." + name + ".adbwfx.tmp.", 0) == 0);
 }
 
 // ---------------------------------------------------------------------
