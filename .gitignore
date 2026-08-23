@@ -1,5 +1,9 @@
+*.wfx
 *.wfx64
+*.so
 *.o
 build/
+dist/
+*.zip
 tests/bin/
 .DS_Store

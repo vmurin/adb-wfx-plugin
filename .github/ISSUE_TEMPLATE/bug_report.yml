@@ -1,0 +1,88 @@
+name: Bug report
+description: Something in the plugin misbehaves
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The fields below are the ones that usually decide
+        whether a bug can be reproduced at all — please fill them in even when
+        they seem irrelevant.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the ADB plugin
+        2. Navigate to /sdcard/DCIM
+        3. Press F5 on a file
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Linux (x86_64)
+        - Linux (aarch64)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      placeholder: "macOS 15.3, Ubuntu 24.04, Fedora 41 ..."
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      description: The release you downloaded, or `git rev-parse --short HEAD` if you built it.
+    validations:
+      required: true
+
+  - type: input
+    id: dc-version
+    attributes:
+      label: Double Commander version
+      placeholder: "1.2.8"
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device and Android version
+      placeholder: "Pixel 7, Android 15"
+    validations:
+      required: true
+
+  - type: textarea
+    id: adb-devices
+    attributes:
+      label: Output of `adb devices -l`
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Error messages, screenshots, whether it is reproducible.

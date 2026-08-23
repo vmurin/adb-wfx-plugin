@@ -1,0 +1,69 @@
+name: Linux build report
+description: Tell us whether a Linux build worked for you — success or failure
+labels: [linux-report]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The Linux builds pass CI but have never been run against a real Android
+        device. **Reports that it simply worked are as valuable as bug reports** —
+        they are what lets the README stop calling Linux untested.
+
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Did it work?
+      options:
+        - Yes, it worked
+        - Partly — some things worked
+        - No, it did not work
+    validations:
+      required: true
+
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution and version
+      placeholder: "Debian 12, Arch, Fedora 41 ..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture
+      options: [x86_64, aarch64]
+    validations:
+      required: true
+
+  - type: input
+    id: dc-version
+    attributes:
+      label: Double Commander version
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device and Android version
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: tried
+    attributes:
+      label: What did you try?
+      options:
+        - label: The plugin loaded and appeared in the VFS list
+        - label: The device showed up
+        - label: Browsing directories worked
+        - label: Downloading a file worked
+        - label: Uploading a file worked
+        - label: The modification date was preserved
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: Anything that went wrong, or simply "all of the above worked".
