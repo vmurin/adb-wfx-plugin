@@ -7,8 +7,10 @@
 #include "testing.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <future>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -571,6 +573,72 @@ TEST(TcpTransportSuite, stalledReadResumesWhenDataFinallyArrives) {
     CHECK(std::memcmp(buf, "late", 4) == 0);
     CHECK(stallPolls > 0); // the stall path really was exercised
 
+    transport->close();
+    server.join();
+    ::close(listenFd);
+}
+
+// The polarity that shipped a hang. readSome consults the stall callback
+// itself, but readExactly drives readSome through loopTransfer -- and
+// loopTransfer was called WITHOUT the stall callback, so `onStall` was
+// null inside the loop. A readSome that returned -1/EAGAIN *because the
+// user cancelled* then hit loopTransfer's timeout branch, where
+// stallShouldKeepWaiting(nullptr) is true, and the loop went straight
+// back into readSome to stall and cancel again, forever. syncRecv reads
+// every sync header and every DATA chunk through readExactly, so Cancel
+// on a stalled pull hung the Double Commander worker thread outright.
+//
+// A FakeTransport cannot see this: its readExactly is a hand-rolled loop
+// that never touches loopTransfer. Only a real TcpTransport can, which is
+// why this test drives one against a silent peer. It runs the read on its
+// own thread with a deadline so the regression fails the suite instead of
+// hanging it.
+
+TEST(TcpTransportSuite, stalledReadExactlyFailsPromptlyWhenCancelledRatherThanLooping) {
+    int port = 0;
+    int listenFd = startListener(&port);
+
+    // Accepts, then says nothing until the test releases it. Closing at
+    // the end is what lets a REGRESSED build's spinning reader terminate,
+    // so a failure here is a failed assertion and not a stuck suite.
+    std::atomic<bool> release{false};
+    std::thread server([listenFd, &release]() {
+        int connFd = ::accept(listenFd, nullptr, nullptr);
+        while (!release) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        ::close(connFd);
+    });
+
+    std::string error;
+    std::unique_ptr<TcpTransport> transport =
+        TcpTransport::connectTo("127.0.0.1", port, &error, /*timeoutMs=*/50);
+    CHECK(transport != nullptr);
+
+    std::atomic<int> stallPolls{0};
+    transport->setStallCallback([&stallPolls]() -> bool {
+        ++stallPolls;
+        return false; // "Cancel", every single time it is asked
+    });
+
+    std::promise<bool> readResult;
+    std::future<bool> readFuture = readResult.get_future();
+    std::thread reader([&]() {
+        char buf[16];
+        readResult.set_value(transport->readExactly(buf, sizeof(buf)));
+    });
+
+    bool finished = readFuture.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+    CHECK(finished);
+    if (finished) {
+        CHECK(!readFuture.get()); // a cancelled read must fail, not succeed
+    }
+    // Two polls: readSome's own retryOnEintr asks once, then loopTransfer
+    // asks once before giving up. The regression produced dozens.
+    CHECK(stallPolls <= 4);
+
+    release = true;
+    reader.join();
     transport->close();
     server.join();
     ::close(listenFd);

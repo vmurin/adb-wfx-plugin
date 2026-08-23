@@ -241,14 +241,29 @@ echo "=== Step 6d: /sdcard is a symlink and must still open as a directory ==="
 # lstat() reports /sdcard as mode 0120777 on every modern device; if the
 # plugin classifies it by that alone, the most common destination on the
 # phone renders as a 21-byte file and cannot be opened at all.
-SDCARD_LIST="$("$DRIVER" list "/$SERIAL/sdcard")"
+# Both listings run with `set -e` suspended and their status captured:
+# a command substitution that fails would otherwise abort the script
+# silently, with none of the fail() messages below ever printed.
+set +e
+SDCARD_LIST="$("$DRIVER" list "/$SERIAL/sdcard" 2>&1)"
+SDCARD_LIST_EXIT=$?
+set -e
+if [ "$SDCARD_LIST_EXIT" -ne 0 ]; then
+    fail "listing /sdcard failed (exit $SDCARD_LIST_EXIT): $SDCARD_LIST"
+fi
 if [ -n "$SDCARD_LIST" ]; then
     pass "/sdcard opens as a directory and lists $(echo "$SDCARD_LIST" | wc -l | tr -d ' ') entries"
 else
     fail "/sdcard listed as empty -- is the symlink being treated as a file?"
 fi
 # ... and the device root must show it AS a directory (trailing field 1).
-ROOT_LIST="$("$DRIVER" list "/$SERIAL")"
+set +e
+ROOT_LIST="$("$DRIVER" list "/$SERIAL" 2>&1)"
+ROOT_LIST_EXIT=$?
+set -e
+if [ "$ROOT_LIST_EXIT" -ne 0 ]; then
+    fail "listing the device root failed (exit $ROOT_LIST_EXIT): $ROOT_LIST"
+fi
 SDCARD_ROW="$(echo "$ROOT_LIST" | awk -F'\t' '$1=="sdcard"{print; exit}')"
 if [ -z "$SDCARD_ROW" ]; then
     fail "no 'sdcard' entry in the device root listing"
@@ -285,9 +300,18 @@ echo "$CACHE_OUT"
 CACHE_FIRST="$(echo "$CACHE_OUT" | awk '$1=="FIRST"{print $2}')"
 CACHE_CACHED="$(echo "$CACHE_OUT" | awk '$1=="CACHED"{print $2}')"
 CACHE_EXPIRED="$(echo "$CACHE_OUT" | awk '$1=="EXPIRED"{print $2}')"
-if [ -z "$CACHE_FIRST" ] || [ -z "$CACHE_CACHED" ] || [ -z "$CACHE_EXPIRED" ]; then
-    fail "cachettl did not print all three counts: $CACHE_OUT"
-fi
+# These are scraped from the driver's stdout, so they must be proven to
+# be plain integers before "-gt" sees them: under `set -e` a non-numeric
+# operand aborts the script with a bare shell arithmetic error and none
+# of the fail() messages below.
+for CACHE_COUNT_NAME in CACHE_FIRST CACHE_CACHED CACHE_EXPIRED; do
+    eval "CACHE_COUNT_VALUE=\${$CACHE_COUNT_NAME}"
+    case "$CACHE_COUNT_VALUE" in
+        ''|*[!0-9]*)
+            fail "cachettl did not print a numeric $CACHE_COUNT_NAME (got '$CACHE_COUNT_VALUE'); full output: $CACHE_OUT"
+            ;;
+    esac
+done
 if [ "$CACHE_CACHED" = "$CACHE_FIRST" ]; then
     pass "the cache served the earlier listing ($CACHE_CACHED entries) while it was still fresh"
 else

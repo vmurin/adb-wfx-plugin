@@ -282,7 +282,15 @@ public:
             [this, p](size_t offset, size_t remaining) {
                 return readSome(p + offset, remaining);
             },
-            n);
+            // The stall callback MUST be passed here, exactly as writeAll
+            // does. readSome consults it on its own, but when it answers
+            // -1/EAGAIN *because the callback said stop*, this loop sees
+            // a timeout errno -- and without the callback it would ask
+            // stallShouldKeepWaiting(nullptr), get "keep waiting", and go
+            // straight back into readSome to stall and cancel again,
+            // forever. syncRecv reads every sync header and every DATA
+            // chunk through here, so that is Cancel hanging a download.
+            n, stallCallback());
     }
 
     ptrdiff_t readSome(void* buf, size_t n) override {
