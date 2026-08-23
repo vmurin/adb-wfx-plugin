@@ -43,6 +43,10 @@ case "$OS" in
         if [ "$UNIVERSAL" -eq 1 ]; then
             COMMON_FLAGS+=(-arch arm64 -arch x86_64)
         fi
+        # Keep the Mach-O export table to the plugin's own Fs* entry points.
+        # See fsplugin.exp: -fvisibility=hidden leaves weak RTTI symbols
+        # exported, which is visible on x86_64 though not on arm64.
+        LINK_FLAGS+=(-Wl,-exported_symbols_list,fsplugin.exp)
         ;;
     Linux)
         if [ "$UNIVERSAL" -eq 1 ]; then

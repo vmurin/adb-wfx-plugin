@@ -1,0 +1,13 @@
+# Mach-O export list: only the WFX entry points leave the dylib.
+#
+# The counterpart of fsplugin.map on ELF, and needed for the same reason.
+# -fvisibility=hidden covers our own code, but RTTI symbols (__ZTI.../__ZTS...)
+# for the std::function instantiations this plugin uses have vague linkage and
+# are emitted as weak *default-visibility* globals, which -fvisibility=hidden
+# does not touch. On arm64 they happen to be optimised away; on x86_64 they are
+# not, and they showed up in the export table.
+#
+# Nothing crosses the dylib boundary as a C++ type -- fsplugin.cpp's exports are
+# extern "C" and each catches its own exceptions -- so RTTI never needs to be
+# matched against another image, and hiding it is safe.
+_Fs*
