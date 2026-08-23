@@ -26,7 +26,7 @@ jobs:
           - name: Linux (aarch64)
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Compiler version
         run: ${CXX:-c++} --version || c++ --version
@@ -47,5 +47,5 @@ jobs:
     name: version.h agrees with CHANGELOG.md
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: ./scripts/check-version.sh
