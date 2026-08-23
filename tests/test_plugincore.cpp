@@ -2331,6 +2331,36 @@ TEST(ShellMutationSuite, formatTouchTArgReturnsFalseForOutOfRangeEpochWithoutTou
     CHECK_STR_EQ(out, "unchanged"); // left untouched on failure
 }
 
+// touch -t's argument gives the year exactly four digits. gmtime_r happily
+// reports year 10000 for this epoch -- it only fails once tm_year itself
+// would overflow -- so nothing upstream rejects it, and "%04d" would widen
+// the field rather than truncate: the device would be handed
+// "100000101000000.00", which touch reads as an entirely different date.
+// Reachable in practice through FsSetTimeW, whose FILETIME is 64-bit even
+// though the sync protocol's own mtime is not.
+TEST(ShellMutationSuite, formatTouchTArgRefusesAYearThatDoesNotFitInFourDigits) {
+    std::string out = "unchanged";
+    bool ok = plugincore_detail::formatTouchTArg(253402300800LL, &out); // 10000-01-01 UTC
+    CHECK(!ok);
+    CHECK_STR_EQ(out, "unchanged");
+}
+
+TEST(ShellMutationSuite, formatTouchTArgAcceptsTheLastYearThatStillFits) {
+    std::string out = "unset";
+    bool ok = plugincore_detail::formatTouchTArg(253402300799LL, &out); // 9999-12-31 23:59:59 UTC
+    CHECK(ok);
+    CHECK_STR_EQ(out, "999912312359.59");
+}
+
+// The other end of the range: a four-digit year is still four digits when
+// it is small, because the format pads it.
+TEST(ShellMutationSuite, formatTouchTArgZeroPadsAnEarlyYear) {
+    std::string out = "unset";
+    bool ok = plugincore_detail::formatTouchTArg(-62135596800LL, &out); // 0001-01-01 UTC
+    CHECK(ok);
+    CHECK_STR_EQ(out, "000101010000.00");
+}
+
 TEST(ShellMutationSuite, setModificationTimeReturnsFalseWhenFallbackTimestampIsOutOfRange) {
     std::string wfxPath = "/SERIAL1/sdcard/a.jpg";
 

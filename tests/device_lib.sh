@@ -110,8 +110,10 @@ build_driver() {
         esac
     fi
     [ "$(uname -s)" = "Linux" ] && libs+=(-ldl)
+    # See run_tests.sh: bash 3.2 (macOS) treats an empty array under `set -u`
+    # as an unbound variable, so the expansion has to be guarded.
     "$cxx" -std=c++17 -Wall -Wextra -Werror -pthread -I. \
-        tests/device_driver.cpp "${libs[@]}" -o tests/bin/device_driver
+        tests/device_driver.cpp ${libs[@]+"${libs[@]}"} -o tests/bin/device_driver
     DRIVER="$(pwd)/tests/bin/device_driver"
 }
 

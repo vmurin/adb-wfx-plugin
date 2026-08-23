@@ -30,7 +30,11 @@ if [ "$OS" = "Linux" ]; then
     TEST_LIBS+=(-ldl)
 fi
 
-"$CXX" "${TEST_FLAGS[@]}" tests/main.cpp tests/test_*.cpp "${TEST_LIBS[@]}" -o tests/bin/run_tests
+# ${TEST_LIBS[@]+"${TEST_LIBS[@]}"} rather than a plain "${TEST_LIBS[@]}":
+# macOS ships bash 3.2, where expanding an *empty* array under `set -u` is an
+# unbound-variable error rather than the empty list bash 4+ gives you.
+"$CXX" "${TEST_FLAGS[@]}" tests/main.cpp tests/test_*.cpp \
+    ${TEST_LIBS[@]+"${TEST_LIBS[@]}"} -o tests/bin/run_tests
 
 ./tests/bin/run_tests
 
@@ -45,6 +49,7 @@ fi
 # must fail -Werror right here, not go unnoticed until someone next has a
 # phone plugged in.
 echo "Building tests/device_driver.cpp..."
-"$CXX" "${TEST_FLAGS[@]}" tests/device_driver.cpp "${TEST_LIBS[@]}" -o tests/bin/device_driver
+"$CXX" "${TEST_FLAGS[@]}" tests/device_driver.cpp \
+    ${TEST_LIBS[@]+"${TEST_LIBS[@]}"} -o tests/bin/device_driver
 
 echo "ALL CHECKS PASSED"

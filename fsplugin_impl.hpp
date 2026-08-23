@@ -360,9 +360,37 @@ inline bool formatTouchTArg(int64_t epochSeconds, std::string* out) {
     if (::gmtime_r(&t, &utc) == nullptr) {
         return false;
     }
+
+    // Every field is range-checked before it reaches snprintf, and a value
+    // outside its range fails the whole call rather than being formatted.
+    //
+    // The year is the one that matters in practice: touch -t's argument has
+    // exactly four digits for it, so a year of 10000 or more cannot be
+    // expressed at all -- "%04d" would widen the field and hand the device a
+    // timestamp whose digits mean something else entirely. glibc's gmtime_r
+    // succeeds for such years (only the tm_year overflow itself makes it
+    // return nullptr above), so the guard has to live here.
+    //
+    // The rest are checked for the same reason the year is: this builds a
+    // shell command, and every one of these is only ever as trustworthy as
+    // the libc that filled the struct in. It also happens to be what lets
+    // gcc see that each conversion writes exactly the width it declares --
+    // without it, -Wformat-truncation cannot rule out an 11-digit int and
+    // the build fails under -Werror.
+    const int year = utc.tm_year + 1900;
+    const int month = utc.tm_mon + 1;
+    if (year < 1 || year > 9999 || month < 1 || month > 12 ||
+        utc.tm_mday < 1 || utc.tm_mday > 31 ||
+        utc.tm_hour < 0 || utc.tm_hour > 23 ||
+        utc.tm_min < 0 || utc.tm_min > 59 ||
+        // A leap second legitimately reports 60 here.
+        utc.tm_sec < 0 || utc.tm_sec > 60) {
+        return false;
+    }
+
     char buf[TOUCH_T_TIMESTAMP_BUFFER_SIZE];
-    std::snprintf(buf, sizeof(buf), "%04d%02d%02d%02d%02d.%02d", utc.tm_year + 1900,
-                  utc.tm_mon + 1, utc.tm_mday, utc.tm_hour, utc.tm_min, utc.tm_sec);
+    std::snprintf(buf, sizeof(buf), "%04d%02d%02d%02d%02d.%02d", year, month, utc.tm_mday,
+                  utc.tm_hour, utc.tm_min, utc.tm_sec);
     *out = buf;
     return true;
 }
