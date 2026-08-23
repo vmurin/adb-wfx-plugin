@@ -126,6 +126,22 @@ int64_t parseOptionalInt(int argc, char** argv, int index, int64_t defaultValue)
     return static_cast<int64_t>(value);
 }
 
+// Second, independent guard against rm/rmdir being pointed at a device's
+// entire filesystem root -- belt and braces alongside whatever guard the
+// calling script applies to the string it constructs. parseRemotePath
+// (adbutils.hpp, transitively included via fsplugin_impl.hpp) normalizes
+// "/<serial>" (no further path component) to path "/", and the WFX root
+// "/" itself parses as isRoot with path "/" too -- both are refused here
+// regardless of what any caller's own path-construction logic intended.
+bool refusesDeviceRoot(const std::string& wfxPath, std::string* reason) {
+    RemotePath rp = parseRemotePath(wfxPath);
+    if (rp.isRoot || rp.path.empty() || rp.path == "/") {
+        *reason = "refusing to rm/rmdir a device's filesystem root: '" + wfxPath + "'";
+        return true;
+    }
+    return false;
+}
+
 int cmdList(AdbClient& client, const std::string& wfxPath) {
     PluginCore core(client);
     std::vector<FindResult> entries;
@@ -193,6 +209,11 @@ int cmdMkdir(AdbClient& client, const std::string& wfxPath) {
 }
 
 int cmdRm(AdbClient& client, const std::string& wfxPath) {
+    std::string rootReason;
+    if (refusesDeviceRoot(wfxPath, &rootReason)) {
+        std::cerr << "ERROR: " << rootReason << "\n";
+        return EXIT_ERROR;
+    }
     PluginCore core(client);
     std::string error;
     if (!core.deleteFile(wfxPath, &error)) {
@@ -204,6 +225,11 @@ int cmdRm(AdbClient& client, const std::string& wfxPath) {
 }
 
 int cmdRmdir(AdbClient& client, const std::string& wfxPath) {
+    std::string rootReason;
+    if (refusesDeviceRoot(wfxPath, &rootReason)) {
+        std::cerr << "ERROR: " << rootReason << "\n";
+        return EXIT_ERROR;
+    }
     PluginCore core(client);
     std::string error;
     if (!core.removeDir(wfxPath, &error)) {

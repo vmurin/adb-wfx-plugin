@@ -38,6 +38,28 @@ assert_under_test_root() {
     esac
 }
 
+# The WFX-path counterpart of assert_under_test_root(): checks the EXACT
+# string a device_driver rm/rmdir/mv call is about to receive (a
+# "/<serial>/<on-device-path>" WFX path), not a look-alike on-device-only
+# path -- the two are easy to conflate, and a guard that checks the wrong
+# variable is worse than no guard at all (it passes review while
+# asserting nothing about what's actually destroyed). Requires $SERIAL to
+# already be set (require_device does this). Call this immediately
+# before every destructive device_driver invocation, on the literal
+# argument being passed to it.
+assert_wfx_under_test_root() {
+    local wfx_test_root="/$SERIAL$TEST_ROOT"
+    case "$1" in
+        "$wfx_test_root"|"$wfx_test_root"/*)
+            return 0
+            ;;
+        *)
+            echo "REFUSING a device_driver call outside $wfx_test_root: '$1'" >&2
+            exit 1
+            ;;
+    esac
+}
+
 # Finds an adb binary (respecting $ADB_PATH first, like adbserver.hpp
 # does), starts its server, and picks the first device in the "device"
 # state from `adb devices -l`. On any failure to find adb or a usable

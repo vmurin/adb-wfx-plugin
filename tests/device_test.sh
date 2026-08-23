@@ -155,6 +155,7 @@ case "$LIST2" in
 esac
 
 assert_under_test_root "$REMOTE2_PATH"
+assert_wfx_under_test_root "$WFX2"
 "$DRIVER" rm "$WFX2" >/dev/null
 LIST3="$("$DRIVER" list "$WFX_ROOT")"
 case "$LIST3" in
@@ -180,6 +181,7 @@ case "$LIST4" in
 esac
 
 assert_under_test_root "$REMOTE3_PATH"
+assert_wfx_under_test_root "$WFX3"
 "$DRIVER" rm "$WFX3" >/dev/null
 LIST5="$("$DRIVER" list "$WFX_ROOT")"
 case "$LIST5" in
@@ -205,22 +207,38 @@ dd if=/dev/zero of="$BIG_LOCAL" bs=1048576 count="$BIG_SIZE_MB" >/dev/null 2>&1
 BIG_REMOTE_WFX="$WFX_ROOT/big.bin"
 BIG_REMOTE_PATH="$TEST_ROOT/big.bin"
 
+# stdout and stderr are captured SEPARATELY (both inside LOCAL_SCRATCH,
+# so the trap cleans them up even if fail() below exits early): a cold
+# adb server prints its own "* daemon not running..." startup message
+# (from startAdbServer's spawned "adb start-server"), which lands on
+# whichever fd adb chooses to use and must never be allowed to corrupt
+# the driver's own single-word stdout output. The match is a substring
+# check (not exact equality) for the same reason: only "ABORTED"
+# appearing on stdout matters, not stdout being *nothing but* that word.
+CANCEL_STDOUT="$LOCAL_SCRATCH/cancel.stdout"
+CANCEL_STDERR="$LOCAL_SCRATCH/cancel.stderr"
 START_TIME=$(date +%s)
 set +e
-"$DRIVER" put "$BIG_LOCAL" "$BIG_REMOTE_WFX" "$CANCEL_AFTER_BYTES" >/tmp/device_test_cancel_out.$$ 2>&1
+"$DRIVER" put "$BIG_LOCAL" "$BIG_REMOTE_WFX" "$CANCEL_AFTER_BYTES" >"$CANCEL_STDOUT" 2>"$CANCEL_STDERR"
 PUT_EXIT=$?
 set -e
 END_TIME=$(date +%s)
 ELAPSED=$((END_TIME - START_TIME))
-CANCEL_OUTPUT="$(cat /tmp/device_test_cancel_out.$$)"
-rm -f /tmp/device_test_cancel_out.$$
+CANCEL_OUTPUT="$(cat "$CANCEL_STDOUT")"
 
-echo "cancel put exit=$PUT_EXIT elapsed=${ELAPSED}s output=$CANCEL_OUTPUT"
-if [ "$PUT_EXIT" -eq 2 ] && [ "$CANCEL_OUTPUT" = "ABORTED" ]; then
-    pass "driver reported ABORTED (exit 2) for the cancelled transfer"
-else
-    fail "expected exit 2 / 'ABORTED' for the cancelled transfer, got exit=$PUT_EXIT output='$CANCEL_OUTPUT'"
-fi
+echo "cancel put exit=$PUT_EXIT elapsed=${ELAPSED}s stdout=$CANCEL_OUTPUT stderr=$(cat "$CANCEL_STDERR")"
+case "$CANCEL_OUTPUT" in
+    *ABORTED*)
+        if [ "$PUT_EXIT" -eq 2 ]; then
+            pass "driver reported ABORTED (exit 2) for the cancelled transfer"
+        else
+            fail "driver printed ABORTED but exited $PUT_EXIT (expected 2)"
+        fi
+        ;;
+    *)
+        fail "expected exit 2 / 'ABORTED' for the cancelled transfer, got exit=$PUT_EXIT stdout='$CANCEL_OUTPUT'"
+        ;;
+esac
 if [ "$ELAPSED" -le 60 ]; then
     pass "cancellation was prompt (${ELAPSED}s)"
 else
@@ -233,6 +251,7 @@ assert_under_test_root "$BIG_REMOTE_PATH"
 
 echo "=== Step 8: cleanup ==="
 assert_under_test_root "$TEST_ROOT"
+assert_wfx_under_test_root "$WFX_ROOT"
 "$DRIVER" rmdir "$WFX_ROOT" >/dev/null
 EXISTS_AFTER="$(remote_path_exists "$TEST_ROOT")"
 if [ "$EXISTS_AFTER" = "NO" ]; then

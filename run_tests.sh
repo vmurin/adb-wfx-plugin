@@ -16,14 +16,14 @@ clang++ -std=c++17 -Wall -Wextra -Werror -pthread -I. tests/main.cpp tests/test_
 ./scripts/check-license.sh
 
 # tests/device_driver.cpp has its own main() and is never swept into the
-# tests/test_*.cpp glob above (see the file's own header comment). It is
-# only compiled here -- never run, since that needs a real device -- so
-# that it stays buildable with -Werror as part of the normal green build;
-# actually exercising it against a phone is tests/device_test.sh's job,
-# opt-in via the same env var.
-if [ "${ADB_WFX_DEVICE_TESTS:-0}" = "1" ]; then
-    echo "Building tests/device_driver.cpp (ADB_WFX_DEVICE_TESTS=1)..."
-    clang++ -std=c++17 -Wall -Wextra -Werror -I. tests/device_driver.cpp -o tests/bin/device_driver
-fi
+# tests/test_*.cpp glob above (see the file's own header comment).
+# Compiling it needs no device (only *running* it does -- that's
+# tests/device_test.sh's job, opt-in via ADB_WFX_DEVICE_TESTS=1), so it
+# is built here unconditionally, as part of the normal green build: a
+# future change to fsplugin_impl.hpp/adbclient.hpp that broke this file
+# must fail -Werror right here, not go unnoticed until someone next has a
+# phone plugged in.
+echo "Building tests/device_driver.cpp..."
+clang++ -std=c++17 -Wall -Wextra -Werror -I. tests/device_driver.cpp -o tests/bin/device_driver
 
 echo "ALL CHECKS PASSED"

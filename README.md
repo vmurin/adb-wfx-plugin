@@ -97,6 +97,16 @@ Once connected, devices appear as directories under a virtual `ADB` root
   metacharacters (`$(...)`, `` `...` ``) — every path sent to the
   device's shell is single-quoted before it gets there.
 
+**A note on how confident to be in the above:** everything in this list
+is covered by the unit test suite (`./run_tests.sh`, against a fake
+transport — no real device involved). The end-to-end test that exercises
+the same behavior against a real phone, `tests/device_test.sh`, is
+written and complete but **has not yet been run against real hardware**
+(see [Testing](#testing)) — including the mtime-preservation behavior
+that is this project's headline claim. Treat "what works" as
+unit-tested-and-designed-to-work, not yet as hardware-confirmed, until
+`tests/device_test.sh` has been run for real and this note is removed.
+
 ## Known limitations
 
 - **Sync protocol v1 only.** This plugin speaks the same wire protocol
@@ -128,9 +138,9 @@ Once connected, devices appear as directories under a virtual `ADB` root
 Double Commander decides whether to copy file dates **at all** — in
 *both* directions, uploads and downloads alike — based on whether the
 plugin exports `FsSetTime` or `FsSetTimeW`. If neither is present, DC
-silently strips the "copy file date" flag from every copy operation, so
-dates would be lost even when *downloading*, a direction this plugin's
-own code has no say in. See
+silently strips the `caoCopyTime` flag (its internal "copy file date"
+flag) from every copy operation, so dates would be lost even when
+*downloading*, a direction this plugin's own code has no say in. See
 [doublecmd/doublecmd#3051](https://github.com/doublecmd/doublecmd/issues/3051).
 
 Because of this, `FsSetTimeW` must always be present in the exported

@@ -20,6 +20,12 @@ cd "$(dirname "$0")/.."
 # shellcheck source=tests/device_lib.sh
 . tests/device_lib.sh
 
+if ! command -v bc >/dev/null 2>&1; then
+    echo "bench.sh: 'bc' is required (used for the MB/s and ratio arithmetic) but was not found." >&2
+    echo "Install it (e.g. via Homebrew: 'brew install bc') and re-run." >&2
+    exit 1
+fi
+
 require_device
 build_driver
 
@@ -89,7 +95,7 @@ for run in $(seq 1 "$RUNS"); do
     assert_under_test_root "$REMOTE_ADB_DIR"
     "$ADB_BIN" -s "$SERIAL" shell "rm -rf '$REMOTE_ADB_DIR'" >/dev/null 2>&1 || true
     "$ADB_BIN" -s "$SERIAL" shell "mkdir -p '$REMOTE_ADB_DIR'" >/dev/null
-    elapsed=$( { time "$ADB_BIN" -s "$SERIAL" push "$CORPUS_DIR"/. "$REMOTE_ADB_DIR" >/dev/null; } 2>&1 )
+    elapsed=$( { time "$ADB_BIN" -s "$SERIAL" push "$CORPUS_DIR"/. "$REMOTE_ADB_DIR" >/dev/null 2>&1; } 2>&1 | tail -1 )
     echo "  run $run: ${elapsed}s"
     adb_push_times+=("$elapsed")
 done
@@ -101,7 +107,7 @@ adb_pull_times=()
 for run in $(seq 1 "$RUNS"); do
     rm -rf "$DOWNLOAD_ADB_DIR"
     mkdir -p "$DOWNLOAD_ADB_DIR"
-    elapsed=$( { time "$ADB_BIN" -s "$SERIAL" pull "$REMOTE_ADB_DIR" "$DOWNLOAD_ADB_DIR" >/dev/null; } 2>&1 )
+    elapsed=$( { time "$ADB_BIN" -s "$SERIAL" pull "$REMOTE_ADB_DIR" "$DOWNLOAD_ADB_DIR" >/dev/null 2>&1; } 2>&1 | tail -1 )
     echo "  run $run: ${elapsed}s"
     adb_pull_times+=("$elapsed")
 done
@@ -116,8 +122,8 @@ for run in $(seq 1 "$RUNS"); do
     "$DRIVER" mkdir "$WFX_PLUGIN_DIR" >/dev/null
     elapsed=$( { time { for f in "$CORPUS_DIR"/*; do
         name="$(basename "$f")"
-        "$DRIVER" put "$f" "$WFX_PLUGIN_DIR/$name" >/dev/null
-    done; }; } 2>&1 )
+        "$DRIVER" put "$f" "$WFX_PLUGIN_DIR/$name" >/dev/null 2>&1
+    done; }; } 2>&1 | tail -1 )
     echo "  run $run: ${elapsed}s"
     plugin_put_times+=("$elapsed")
 done
@@ -131,8 +137,8 @@ for run in $(seq 1 "$RUNS"); do
     mkdir -p "$DOWNLOAD_PLUGIN_DIR"
     elapsed=$( { time { for f in "$CORPUS_DIR"/*; do
         name="$(basename "$f")"
-        "$DRIVER" get "$WFX_PLUGIN_DIR/$name" "$DOWNLOAD_PLUGIN_DIR/$name" >/dev/null
-    done; }; } 2>&1 )
+        "$DRIVER" get "$WFX_PLUGIN_DIR/$name" "$DOWNLOAD_PLUGIN_DIR/$name" >/dev/null 2>&1
+    done; }; } 2>&1 | tail -1 )
     echo "  run $run: ${elapsed}s"
     plugin_get_times+=("$elapsed")
 done
