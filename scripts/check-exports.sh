@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Asserts, via `nm -gU`, that fsplugin.wfx64 exports every symbol Double
-# Commander needs. Builds the plugin
-# first if it isn't there yet, so this also works on a clean checkout.
+# Asserts that fsplugin.wfx64 exports every symbol Double Commander needs --
+# and nothing else. Builds the plugin first if it isn't there yet, so this
+# also works on a clean checkout.
+#
+# The symbol table is read with the platform's own tool: `nm -gU` on Mach-O,
+# where every C-linkage symbol carries a leading underscore, and
+# `nm -D --defined-only` on ELF, where it does not.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 if [ ! -f fsplugin.wfx64 ]; then
-    ./compile_mac.sh
+    ./build.sh
 fi
 
 EXPORTS=(
@@ -27,12 +31,24 @@ EXPORTS=(
     FsDisconnectW
 )
 
-actual="$(nm -gU fsplugin.wfx64 | awk '{print $NF}')"
+case "$(uname -s)" in
+    Darwin)
+        actual="$(nm -gU fsplugin.wfx64 | awk '{print $NF}')"
+        prefix="_"
+        ;;
+    Linux)
+        actual="$(nm -D --defined-only fsplugin.wfx64 | awk '{print $NF}')"
+        prefix=""
+        ;;
+    *)
+        echo "check-exports.sh: unsupported platform: $(uname -s)" >&2
+        exit 2
+        ;;
+esac
 
 missing=""
 for symbol in "${EXPORTS[@]}"; do
-    # Mach-O gives every C-linkage symbol a leading underscore.
-    if ! grep -qx "_${symbol}" <<< "$actual"; then
+    if ! grep -qx "${prefix}${symbol}" <<< "$actual"; then
         missing="${missing}  ${symbol}"$'\n'
     fi
 done
@@ -49,10 +65,20 @@ fi
 # silently strips caoCopyTime from every copy operation when neither is
 # exported -- losing dates even on downloads, where this plugin plays no
 # part in setting them.
-if ! grep -qx "_FsSetTimeW" <<< "$actual"; then
+if ! grep -qx "${prefix}FsSetTimeW" <<< "$actual"; then
     echo "check-exports.sh FAILED: FsSetTimeW is not exported." >&2
     echo "Double Commander will silently stop copying file dates in both directions." >&2
     exit 1
 fi
 
-echo "check-exports.sh: all exports present (FsSetTimeW confirmed by name)."
+# Nothing from the C++ side may leak out alongside them. -fvisibility=hidden
+# (and, on ELF, fsplugin.map) is what keeps that true; this catches the day
+# someone adds a stray non-static definition or an explicit dllexport.
+leaked="$(grep '^_\?_Z' <<< "$actual" || true)"
+if [ -n "$leaked" ]; then
+    echo "check-exports.sh FAILED: mangled C++ symbols are exported:" >&2
+    printf '%s\n' "$leaked" >&2
+    exit 1
+fi
+
+echo "check-exports.sh: all exports present (FsSetTimeW confirmed by name), no C++ symbols leaked."

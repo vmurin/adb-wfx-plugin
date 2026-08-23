@@ -112,14 +112,14 @@ fi
 echo "=== Step 4: download it back, compare mtime and bytes ==="
 ONEMIB_DOWNLOADED="$LOCAL_SCRATCH/onemib.downloaded.bin"
 "$DRIVER" get "$ONEMIB_REMOTE_WFX" "$ONEMIB_DOWNLOADED" >/dev/null
-DOWNLOADED_EPOCH="$(stat -f "%m" "$ONEMIB_DOWNLOADED")"
+DOWNLOADED_EPOCH="$(local_mtime "$ONEMIB_DOWNLOADED")"
 if [ "$DOWNLOADED_EPOCH" = "$REMOTE_EPOCH" ]; then
     pass "downloaded local mtime ($DOWNLOADED_EPOCH) matches remote mtime"
 else
     fail "downloaded local mtime ($DOWNLOADED_EPOCH) != remote mtime ($REMOTE_EPOCH)"
 fi
-SUM_UPLOADED="$(shasum -a 256 "$ONEMIB_LOCAL" | awk '{print $1}')"
-SUM_DOWNLOADED="$(shasum -a 256 "$ONEMIB_DOWNLOADED" | awk '{print $1}')"
+SUM_UPLOADED="$(local_sha256 "$ONEMIB_LOCAL")"
+SUM_DOWNLOADED="$(local_sha256 "$ONEMIB_DOWNLOADED")"
 if [ "$SUM_UPLOADED" = "$SUM_DOWNLOADED" ]; then
     pass "downloaded bytes match uploaded bytes ($SUM_UPLOADED)"
 else

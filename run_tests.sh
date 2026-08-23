@@ -1,13 +1,36 @@
 #!/usr/bin/env bash
+# The full unit suite. Needs no Android device -- everything below runs
+# against tests/fake_transport.hpp. Ends with ALL CHECKS PASSED.
+#
+# The device-backed suites are separate and opt-in: tests/device_test.sh
+# (ADB_WFX_DEVICE_TESTS=1) and tests/bench.sh.
 set -euo pipefail
+
+cd "$(dirname "$0")"
 
 mkdir -p tests/bin
 
 # Build the plugin first so tests/test_exports.cpp's dlopen test exercises
 # the real thing rather than its SKIP path.
-./compile_mac.sh
+./build.sh
 
-clang++ -std=c++17 -Wall -Wextra -Werror -pthread -I. tests/main.cpp tests/test_*.cpp -o tests/bin/run_tests
+OS="$(uname -s)"
+if [ -z "${CXX:-}" ]; then
+    case "$OS" in
+        Darwin) CXX=clang++ ;;
+        *)      CXX=g++ ;;
+    esac
+fi
+
+TEST_FLAGS=(-std=c++17 -Wall -Wextra -Werror -pthread -I.)
+TEST_LIBS=()
+if [ "$OS" = "Linux" ]; then
+    # tests/test_exports.cpp dlopen()s the built plugin; glibc older than 2.34
+    # keeps dlopen in libdl rather than libc.
+    TEST_LIBS+=(-ldl)
+fi
+
+"$CXX" "${TEST_FLAGS[@]}" tests/main.cpp tests/test_*.cpp "${TEST_LIBS[@]}" -o tests/bin/run_tests
 
 ./tests/bin/run_tests
 
@@ -22,6 +45,6 @@ clang++ -std=c++17 -Wall -Wextra -Werror -pthread -I. tests/main.cpp tests/test_
 # must fail -Werror right here, not go unnoticed until someone next has a
 # phone plugged in.
 echo "Building tests/device_driver.cpp..."
-clang++ -std=c++17 -Wall -Wextra -Werror -I. tests/device_driver.cpp -o tests/bin/device_driver
+"$CXX" "${TEST_FLAGS[@]}" tests/device_driver.cpp "${TEST_LIBS[@]}" -o tests/bin/device_driver
 
 echo "ALL CHECKS PASSED"

@@ -101,6 +101,35 @@ require_device() {
 # just run run_tests.sh) still has a driver to invoke.
 build_driver() {
     mkdir -p tests/bin
-    clang++ -std=c++17 -Wall -Wextra -Werror -I. tests/device_driver.cpp -o tests/bin/device_driver
+    local cxx="${CXX:-}"
+    local libs=()
+    if [ -z "$cxx" ]; then
+        case "$(uname -s)" in
+            Darwin) cxx=clang++ ;;
+            *)      cxx=g++ ;;
+        esac
+    fi
+    [ "$(uname -s)" = "Linux" ] && libs+=(-ldl)
+    "$cxx" -std=c++17 -Wall -Wextra -Werror -pthread -I. \
+        tests/device_driver.cpp "${libs[@]}" -o tests/bin/device_driver
     DRIVER="$(pwd)/tests/bin/device_driver"
+}
+
+# Local-filesystem helpers that differ between BSD (macOS) and GNU (Linux)
+# userland. Both device scripts go through these rather than calling stat or
+# a checksum tool directly.
+local_mtime() {
+    if [ "$(uname -s)" = "Darwin" ]; then
+        stat -f "%m" "$1"
+    else
+        stat -c "%Y" "$1"
+    fi
+}
+
+local_sha256() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        sha256sum "$1" | awk '{print $1}'
+    fi
 }

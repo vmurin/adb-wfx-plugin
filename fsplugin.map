@@ -1,0 +1,12 @@
+# ELF version script: only the WFX entry points leave the shared object.
+#
+# The C++ side is already compiled with -fvisibility=hidden, but the linker
+# adds _init, _fini, __bss_start, _edata and _end to .dynsym on its own, which
+# would leave scripts/check-exports.sh unable to assert "exactly these 14".
+# Restricting the global set here restores that property.
+{
+    global:
+        Fs*;
+    local:
+        *;
+};
