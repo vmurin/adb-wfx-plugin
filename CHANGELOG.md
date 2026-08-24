@@ -5,6 +5,31 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `install.sh` now finishes the install instead of stopping halfway: it
+  registers the plugin in `doublecmd.xml` as `ADB` rather than printing the
+  GUI steps and leaving the rest to the reader. The XML editing lives in
+  `scripts/register_plugin.py` (python3, standard library only), which is
+  idempotent — a re-install updates the existing entry instead of adding a
+  second one — and backs the configuration up first.
+- `install.sh --no-register` for the old behaviour: copy the plugin file and
+  nothing else.
+- `install.sh` refuses to register while Double Commander is running, since DC
+  rewrites `doublecmd.xml` on exit and would discard the change. When it cannot
+  register for any other reason — no `python3`, or Double Commander has never
+  been started and so has no configuration file yet — it prints the manual
+  steps and the exact XML block instead of failing quietly.
+- `install.sh` also looks for the configuration inside Flatpak and Snap
+  sandboxes on Linux.
+- `tests/test_install.sh`, run as part of `./run_tests.sh`. It covers the
+  registrar against synthetic configurations — including the case that makes
+  naive matching dangerous: Double Commander's own MTP plugin is also called
+  `fsplugin.wfx64`, so a registration keyed on the file name alone would
+  rewrite the user's MTP entry.
+
 ## [1.0.0] - 2026-08-24
 
 First public release.
@@ -45,4 +70,5 @@ only, permission-denied directories are indistinguishable from empty ones, and
 F6 to or from a local disk is refused by Double Commander itself before the
 plugin is asked to do anything.
 
+[Unreleased]: https://github.com/vmurin/adb-wfx-plugin/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/vmurin/adb-wfx-plugin/releases/tag/v1.0.0

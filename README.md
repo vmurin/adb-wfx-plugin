@@ -49,9 +49,9 @@ Android Studio and distribution package locations.
 
 ## Installing
 
-Copying the plugin into place is **only half of the install**. Double Commander
-does not scan for plugins — it loads the ones listed in its own configuration,
-so step 4 below is required, not a fallback.
+Installing a plugin is two things: putting the file somewhere permanent, and
+listing it in Double Commander's configuration — DC never scans for plugins, it
+loads only what its configuration names. `install.sh` does both.
 
 **1. Get the plugin.** Download the archive for your platform from
 [Releases](https://github.com/vmurin/adb-wfx-plugin/releases/latest) and unzip
@@ -65,7 +65,11 @@ Double Commander:
 xattr -dr com.apple.quarantine fsplugin.wfx64
 ```
 
-**3. Put the file in place.**
+**3. Quit Double Commander completely.** It rewrites `doublecmd.xml` when it
+exits, so a registration written while it is running is thrown away. The
+installer checks for this and refuses rather than doing something useless.
+
+**4. Run the installer.**
 
 ```sh
 ./install.sh          # from an unpacked release archive
@@ -75,21 +79,24 @@ xattr -dr com.apple.quarantine fsplugin.wfx64
 It copies `fsplugin.wfx64` into Double Commander's own configuration directory —
 `~/Library/Preferences/doublecmd/plugins/wfx/adb/` on macOS,
 `~/.config/doublecmd/plugins/wfx/adb/` on Linux — creating that subdirectory if
-needed and backing up any file already there first. It writes nowhere else.
+needed, then adds the plugin to `doublecmd.xml` under the name **`ADB`**. Both
+the plugin file and the configuration are backed up before anything is
+overwritten, and nothing outside those two places is touched. Running it again
+updates the existing entry instead of adding a second one.
+
+Registering needs `python3`; the XML editing is done by
+[`register_plugin.py`](scripts/register_plugin.py), which ships alongside the
+installer. If `python3` is missing, or Double Commander has never been started
+and so has no `doublecmd.xml` yet, the installer says so and prints the manual
+steps rather than failing quietly. `--no-register` skips the step deliberately
+and just copies the file.
 
 Installing into the configuration directory rather than into the application
 itself is deliberate: a plugin inside `Double Commander.app` (or `/usr/lib`) is
 wiped by the next update, and on macOS writing into the bundle invalidates its
 code signature.
 
-**4. Register it in Double Commander. This step is mandatory.**
-
-1. **Configuration → Options… → Plugins → WFX plugins**
-2. **Add**, and select the file that step 3 reported, e.g.
-   `~/Library/Preferences/doublecmd/plugins/wfx/adb/fsplugin.wfx64`
-3. Name it **`ADB`**, confirm with **OK**, then **Apply**.
-
-**5. Quit Double Commander completely and start it again.**
+**5. Start Double Commander.**
 
 **6. Open it.** **Commands → Open VFS list**, then choose **ADB**.
 
@@ -99,11 +106,22 @@ prompts.
 Devices then appear as directories under the `ADB` root, named
 `<model> (<serial>)` — for example `/<model> (<serial>)/sdcard/...`.
 
+### Registering by hand
+
+If the installer could not do it, or you would rather do it yourself, with
+Double Commander closed:
+
+1. **Configuration → Options… → Plugins → WFX plugins**
+2. **Add**, and select the file that step 4 reported, e.g.
+   `~/Library/Preferences/doublecmd/plugins/wfx/adb/fsplugin.wfx64`
+3. Name it **`ADB`**, confirm with **OK**, then **Apply**.
+4. Quit Double Commander completely and start it again.
+
 ### Checking that the registration took
 
 Double Commander records registered plugins in `doublecmd.xml`
 (`~/Library/Preferences/doublecmd/doublecmd.xml` on macOS,
-`~/.config/doublecmd/doublecmd.xml` on Linux). After step 4 it should contain:
+`~/.config/doublecmd/doublecmd.xml` on Linux). It should contain:
 
 ```xml
 <WfxPlugins>
@@ -122,7 +140,7 @@ in by hand. Edit the file only while Double Commander is closed — it rewrites
 
 | Symptom | Cause |
 | --- | --- |
-| No `ADB` entry in the VFS list | Step 4 was skipped, or Double Commander was not restarted. |
+| No `ADB` entry in the VFS list | The registration did not happen — check `doublecmd.xml` as above, or [register by hand](#registering-by-hand). Double Commander running while the installer ran is the usual cause. |
 | macOS: the plugin fails to load | The quarantine attribute is still set — step 2. |
 | `ADB` opens but lists no devices | The device is not visible to `adb` itself. Check `adb devices`, the USB cable, and that you accepted the authorisation prompt on the phone. |
 | "adb not found" | Set `ADB_PATH` to the full path of your `adb` binary. |

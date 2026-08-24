@@ -29,6 +29,9 @@ mkdir -p "$STAGE"
 cp fsplugin.wfx64 "$STAGE/"
 cp README.md LICENSE CHANGELOG.md "$STAGE/"
 cp scripts/install.sh "$STAGE/"
+# install.sh looks for the registrar next to itself, which is the archive root
+# here and scripts/ in a source checkout.
+cp scripts/register_plugin.py "$STAGE/"
 sed "s/@VERSION@/$VERSION/" packaging/pluginst.inf.in > "$STAGE/pluginst.inf"
 
 # Everything sits at the archive root, with no wrapping directory: that is
