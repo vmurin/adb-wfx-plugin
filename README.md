@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/vmurin/adb-wfx-plugin/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/vmurin/adb-wfx-plugin/actions/workflows/ci.yml?query=branch%3Amain)
 [![Latest release](https://img.shields.io/github/v/release/vmurin/adb-wfx-plugin?sort=semver)](https://github.com/vmurin/adb-wfx-plugin/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/vmurin/adb-wfx-plugin/total?label=downloads)](https://github.com/vmurin/adb-wfx-plugin/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A Double Commander [WFX file-system plugin](https://doublecmd.sourceforge.io/)
