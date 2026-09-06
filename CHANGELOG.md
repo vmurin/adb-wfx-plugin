@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `install.sh` checks that the plugin is a library this machine can actually
+  load before installing it, and refuses a foreign one, naming the archive to
+  download instead. Every release archive contains a file called
+  `fsplugin.wfx64`, so downloading the Linux one on a Mac — `aarch64` reads as
+  "Apple Silicon" easily enough — used to install cleanly and fail much later,
+  inside Double Commander, as the unhelpful "This is not a valid plugin!". The
+  file format is fatal; a Mach-O built for the other architecture is only a
+  warning, since it still loads under Rosetta.
 - `install.sh` now finishes the install instead of stopping halfway: it
   registers the plugin in `doublecmd.xml` as `ADB` rather than printing the
   GUI steps and leaving the rest to the reader. The XML editing lives in

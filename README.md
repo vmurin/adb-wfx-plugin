@@ -59,12 +59,16 @@ loads only what its configuration names. `install.sh` does both.
 it, or build from source (see [Building](#building)).
 
 **2. macOS only — clear the quarantine attribute.** Anything downloaded from the
-internet is quarantined, and macOS will not load a quarantined library into
-Double Commander:
+internet is quarantined, and macOS refuses to load a quarantined library into
+Double Commander: it puts up a dialog of its own offering to move the file to
+the Trash, and Console records `library load disallowed by system policy`.
 
 ```sh
 xattr -dr com.apple.quarantine fsplugin.wfx64
 ```
+
+`install.sh` also clears the attribute from the copy it installs, so this step
+matters mainly when you put the file in place by hand.
 
 **3. Quit Double Commander completely.** It rewrites `doublecmd.xml` when it
 exits, so a registration written while it is running is thrown away. The
@@ -142,7 +146,8 @@ in by hand. Edit the file only while Double Commander is closed — it rewrites
 | Symptom | Cause |
 | --- | --- |
 | No `ADB` entry in the VFS list | The registration did not happen — check `doublecmd.xml` as above, or [register by hand](#registering-by-hand). Double Commander running while the installer ran is the usual cause. |
-| macOS: the plugin fails to load | The quarantine attribute is still set — step 2. |
+| Double Commander says "This is not a valid plugin!" | The file is not a library this machine can load — nearly always the wrong release archive. All of them contain a file called `fsplugin.wfx64`, and only `adb-wfx-<version>-macos-universal.zip` holds the macOS build: `aarch64` in a Linux archive name is not Apple Silicon. Check with `file <path to fsplugin.wfx64>` — it must say `Mach-O` on macOS, `ELF` on Linux. `install.sh` refuses a foreign binary rather than installing it. |
+| macOS: a system dialog says the file cannot be opened, and offers to move it to the Trash | The quarantine attribute — step 2. That dialog comes from macOS itself, not from Double Commander, and Console logs `library load disallowed by system policy` alongside it. |
 | `ADB` opens but lists no devices | The device is not visible to `adb` itself. Check `adb devices`, the USB cable, and that you accepted the authorisation prompt on the phone. |
 | "adb not found" | Set `ADB_PATH` to the full path of your `adb` binary. |
 | Dates are not preserved on copy | Double Commander's "copy file date" option is off, or an older build without `FsSetTimeW` is still registered — see [the `FsSetTimeW` gotcha](#the-fssettimew-gotcha). |

@@ -17,6 +17,12 @@
 # doublecmd.xml -- never into the sibling plugin directories that may live next
 # to it. Backs up anything it overwrites first.
 #
+# The three release archives all contain a file called fsplugin.wfx64, and only
+# one of them is native to any given machine. This script refuses to install a
+# plugin built for another platform, because Double Commander's only complaint
+# about one is "This is not a valid plugin!", said long afterwards and pointing
+# at nothing in particular.
+#
 # Copying the file is only half of an install: Double Commander does not scan
 # for plugins, it loads the ones listed in its configuration. That is what the
 # registration step is for. It needs python3 and needs Double Commander to be
@@ -117,6 +123,83 @@ if [ "$PRINT_XML" -eq 1 ]; then
     print_xml_block
     exit 0
 fi
+
+# Look at the file itself before copying it anywhere: every release archive
+# holds one called fsplugin.wfx64, and only one of them is native here.
+#
+# The format -- Mach-O against ELF -- is fatal: no amount of configuration
+# makes a Linux library load on macOS. The architecture is only a warning on
+# macOS, because an x86_64 build does load into a Double Commander running
+# under Rosetta; on Linux there is no such second chance.
+
+# <file> <offset> <count> -> those bytes as lowercase hex, no separators.
+file_bytes() {
+    od -An -tx1 -j "$2" -N "$3" "$1" | tr -d ' \n'
+}
+
+case "$OS" in
+    Darwin) WANT_ARCHIVE="adb-wfx-<version>-macos-universal.zip" ;;
+    Linux)  WANT_ARCHIVE="adb-wfx-<version>-linux-$(uname -m).zip" ;;
+esac
+
+foreign_plugin() { # <what the file actually is>
+    echo "install.sh: $SOURCE is $1." >&2
+    echo "  This system cannot load it: Double Commander would reject it with" >&2
+    echo "  \"This is not a valid plugin!\" once you registered it. Nothing has" >&2
+    echo "  been installed. Download the archive built for this platform:" >&2
+    echo "    $WANT_ARCHIVE" >&2
+    echo "  https://github.com/vmurin/adb-wfx-plugin/releases/latest" >&2
+    exit 1
+}
+
+MAGIC="$(file_bytes "$SOURCE" 0 4)"
+case "$OS" in
+    Darwin)
+        case "$MAGIC" in
+            # A thin 64-bit Mach-O, or a universal ("fat") one holding several.
+            cffaedfe|cafebabe|cafebabf) ;;
+            7f454c46) foreign_plugin "a Linux library (ELF)" ;;
+            *)        foreign_plugin "not a macOS library (no Mach-O header)" ;;
+        esac
+        # lipo ships with the Xcode command line tools and may not be here; for
+        # a thin file the cputype in the header answers the same question.
+        ARCHS=""
+        if command -v lipo >/dev/null 2>&1; then
+            ARCHS="$(lipo -archs "$SOURCE" 2>/dev/null || true)"
+        elif [ "$MAGIC" = "cffaedfe" ]; then
+            case "$(file_bytes "$SOURCE" 4 4)" in
+                07000001) ARCHS="x86_64" ;;
+                0c000001) ARCHS="arm64" ;;
+            esac
+        fi
+        if [ -n "$ARCHS" ]; then
+            case " $ARCHS " in
+                *" $(uname -m) "*) ;;
+                *)
+                    echo "install.sh: warning: this plugin is built for" \
+                         "$ARCHS, and this Mac is $(uname -m)." >&2
+                    echo "  It will load only into a Double Commander running" >&2
+                    echo "  under Rosetta. The universal build in" >&2
+                    echo "  $WANT_ARCHIVE loads into either." >&2
+                    ;;
+            esac
+        fi
+        ;;
+    Linux)
+        case "$MAGIC" in
+            7f454c46) ;;
+            cffaedfe|cafebabe|cafebabf) foreign_plugin "a macOS library (Mach-O)" ;;
+            *) foreign_plugin "not a Linux library (no ELF header)" ;;
+        esac
+        # e_machine: two little-endian bytes at offset 0x12. Only the two
+        # architectures this project ships are named -- anything else falls
+        # through rather than being refused on a guess.
+        case "$(uname -m):$(file_bytes "$SOURCE" 18 2)" in
+            x86_64:b700)             foreign_plugin "an ARM (aarch64) library" ;;
+            aarch64:3e00|arm64:3e00) foreign_plugin "an x86-64 library" ;;
+        esac
+        ;;
+esac
 
 # -x matches the process name exactly, unlike -f, which matches the whole
 # command line and would happily match this script's own arguments. The

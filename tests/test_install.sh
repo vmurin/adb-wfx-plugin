@@ -216,13 +216,75 @@ fi
 
 echo "test_install.sh: install.sh"
 
+# A stand-in for the plugin keeps this suite independent of whether the real
+# one has been built yet -- but install.sh reads the file's header now, so the
+# stand-in has to carry a real one. Only the header is real: nothing here is
+# ever loaded, only inspected.
+#
+#   native      what this machine can load
+#   foreign     the other operating system's format -- i.e. the wrong archive
+#   wrong-arch  the right format, the other architecture
+make_plugin() { # <path> <kind>
+    python3 - "$1" "$2" "$(uname -s)" "$(uname -m)" <<'MAKEPLUGIN'
+import struct
+import sys
+
+path, kind, osname, machine = sys.argv[1:5]
+
+CPU_X86_64, CPU_ARM64 = 0x01000007, 0x0100000C
+EM_X86_64, EM_AARCH64 = 62, 183
+
+
+def macho(cputype):
+    # MH_MAGIC_64, cputype, cpusubtype, MH_DYLIB and an empty load-command
+    # table, padded so the header is not the whole file.
+    return struct.pack("<IiiIIII", 0xFEEDFACF, cputype, 0, 6, 0, 0, 0) + b"\0" * 32
+
+
+def elf(e_machine):
+    h = bytearray(64)
+    h[0:4] = b"\x7fELF"
+    h[4] = 2  # ELFCLASS64
+    h[5] = 1  # ELFDATA2LSB
+    h[6] = 1  # EV_CURRENT
+    h[16:18] = struct.pack("<H", 3)  # ET_DYN
+    h[18:20] = struct.pack("<H", e_machine)
+    return bytes(h)
+
+
+if osname == "Darwin":
+    host, other = (CPU_ARM64, CPU_X86_64) if machine == "arm64" \
+        else (CPU_X86_64, CPU_ARM64)
+    data = {
+        "native": lambda: macho(host),
+        "wrong-arch": lambda: macho(other),
+        "foreign": lambda: elf(EM_AARCH64),
+    }[kind]()
+else:
+    host, other = (EM_AARCH64, EM_X86_64) if machine in ("aarch64", "arm64") \
+        else (EM_X86_64, EM_AARCH64)
+    data = {
+        "native": lambda: elf(host),
+        "wrong-arch": lambda: elf(other),
+        "foreign": lambda: macho(CPU_ARM64),
+    }[kind]()
+
+with open(path, "wb") as fh:
+    fh.write(data)
+MAKEPLUGIN
+}
+
 # A release-archive layout: install.sh, the registrar and the plugin side by
-# side. Using a stand-in for the plugin keeps this suite independent of
-# whether the real one has been built yet.
-RELEASE="$SANDBOX/release"
-mkdir -p "$RELEASE"
-cp "$REPO/scripts/install.sh" "$REPO/scripts/register_plugin.py" "$RELEASE/"
-printf 'not really a shared library\n' >"$RELEASE/fsplugin.wfx64"
+# side.
+new_release() { # <name> <kind> -> echoes the release directory
+    local dir="$SANDBOX/$1"
+    mkdir -p "$dir"
+    cp "$REPO/scripts/install.sh" "$REPO/scripts/register_plugin.py" "$dir/"
+    make_plugin "$dir/fsplugin.wfx64" "$2"
+    echo "$dir"
+}
+
+RELEASE="$(new_release release native)"
 
 # Stubs that come first on PATH. pgrep-absent is the honest default for these
 # tests: it makes "is Double Commander running" answer no, deterministically.
@@ -317,6 +379,51 @@ OUT="$(run_install home13 2>&1)"
 assert_contains "13: explains the missing config" "$OUT" "Start Double Commander once"
 assert_eq "13: created no doublecmd.xml" "0" \
     "$(find "$SANDBOX/home13" -name doublecmd.xml | wc -l | tr -d ' ')"
+
+# 14. The wrong release archive: a library for the other operating system.
+#     Refuse it here, while the download is still in sight, rather than leaving
+#     Double Commander to say "This is not a valid plugin!" much later.
+FOREIGN="$(new_release release-foreign foreign)"
+CFGDIR="$(new_home home14)"
+cp "$CFGDIR/doublecmd.xml" "$SANDBOX/home14.orig"
+set +e
+OUT="$(env HOME="$SANDBOX/home14" XDG_CONFIG_HOME="$SANDBOX/home14/.config" \
+        PATH="$STUBS:$PATH" "$FOREIGN/install.sh" 2>&1)"
+STATUS=$?
+set -e
+assert_eq "14: exits nonzero" "1" "$STATUS"
+assert_contains "14: names the symptom" "$OUT" "This is not a valid plugin!"
+assert_contains "14: names the right archive" "$OUT" "adb-wfx-<version>-"
+if [ -e "$CFGDIR/plugins/wfx/adb/fsplugin.wfx64" ]; then
+    fail "14: foreign plugin was installed anyway"
+else
+    pass
+fi
+if cmp -s "$CFGDIR/doublecmd.xml" "$SANDBOX/home14.orig"; then pass; else fail "14: doublecmd.xml was modified"; fi
+
+# 15. The right format, the other architecture. On macOS that still loads into
+#     a Double Commander running under Rosetta, so it warns and installs; on
+#     Linux nothing can load it, so it is refused like case 14.
+OTHERARCH="$(new_release release-otherarch wrong-arch)"
+CFGDIR="$(new_home home15)"
+set +e
+OUT="$(env HOME="$SANDBOX/home15" XDG_CONFIG_HOME="$SANDBOX/home15/.config" \
+        PATH="$STUBS:$PATH" "$OTHERARCH/install.sh" 2>&1)"
+STATUS=$?
+set -e
+if [ "$(uname -s)" = "Darwin" ]; then
+    assert_eq "15: macOS installs it anyway" "0" "$STATUS"
+    assert_contains "15: warns about Rosetta" "$OUT" "under Rosetta"
+    if [ -x "$CFGDIR/plugins/wfx/adb/fsplugin.wfx64" ]; then pass; else fail "15: plugin not installed"; fi
+else
+    assert_eq "15: Linux refuses it" "1" "$STATUS"
+    assert_contains "15: names the symptom" "$OUT" "This is not a valid plugin!"
+    if [ -e "$CFGDIR/plugins/wfx/adb/fsplugin.wfx64" ]; then
+        fail "15: wrong-architecture plugin was installed anyway"
+    else
+        pass
+    fi
+fi
 
 # --- result -----------------------------------------------------------------
 
