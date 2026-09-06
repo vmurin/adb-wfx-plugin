@@ -56,7 +56,11 @@ loads only what its configuration names. `install.sh` does both.
 
 **1. Get the plugin.** Download the archive for your platform from
 [Releases](https://github.com/vmurin/adb-wfx-plugin/releases/latest) and unzip
-it, or build from source (see [Building](#building)).
+it, or build from source (see [Building](#building)). There is one archive per
+platform and they are not interchangeable: `…-macos-universal.zip` covers both
+Apple silicon and Intel Macs, while `…-linux-aarch64.zip` is Linux on ARM, not
+a Mac. Each archive names its own platform, in the name of the `PLATFORM-*.txt`
+file inside it.
 
 **2. macOS only — clear the quarantine attribute.** Anything downloaded from the
 internet is quarantined, and macOS refuses to load a quarantined library into

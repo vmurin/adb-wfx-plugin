@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Every release archive now names the platform it was built for, in a
+  `PLATFORM-<platform>.txt` at its root and in the `pluginst.inf` description
+  Double Commander shows when installing a plugin straight from the zip. An
+  unpacked archive used to be indistinguishable from the other two: all of them
+  hold a file called `fsplugin.wfx64`, and the zip name was the only thing that
+  ever said `linux` or `macos`. `tests/test_package.sh` covers this, along with
+  the older invariant it must not break — `pluginst.inf` sits at the archive
+  root, or Double Commander stops recognising the zip as an installable plugin.
 - `install.sh` checks that the plugin is a library this machine can actually
   load before installing it, and refuses a foreign one, naming the archive to
   download instead. Every release archive contains a file called

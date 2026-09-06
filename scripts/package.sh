@@ -32,7 +32,28 @@ cp scripts/install.sh "$STAGE/"
 # install.sh looks for the registrar next to itself, which is the archive root
 # here and scripts/ in a source checkout.
 cp scripts/register_plugin.py "$STAGE/"
-sed "s/@VERSION@/$VERSION/" packaging/pluginst.inf.in > "$STAGE/pluginst.inf"
+sed -e "s/@VERSION@/$VERSION/" -e "s/@PLATFORM@/$SUFFIX/" \
+    packaging/pluginst.inf.in > "$STAGE/pluginst.inf"
+
+# Every archive holds a file called fsplugin.wfx64, and an unpacked one is
+# otherwise indistinguishable from the other two -- the zip name, which is the
+# only thing that said "linux" or "macos", is gone by then, and "aarch64" reads
+# as "Apple silicon" easily enough. So the platform gets its own name in the
+# file listing, where it is answered without opening anything, and pluginst.inf
+# carries it too: Double Commander offers to install a plugin straight from the
+# zip, and that route never goes anywhere near install.sh or its checks.
+cat >"$STAGE/PLATFORM-$SUFFIX.txt" <<MARKER
+adb-wfx $VERSION -- this archive holds the $SUFFIX build, and no other.
+
+A build for one platform cannot be loaded on another: Double Commander
+rejects it with "This is not a valid plugin!" and says nothing about why.
+
+  macOS, Apple silicon and Intel   adb-wfx-$VERSION-macos-universal.zip
+  Linux on x86_64                  adb-wfx-$VERSION-linux-x86_64.zip
+  Linux on ARM64                   adb-wfx-$VERSION-linux-aarch64.zip
+
+https://github.com/vmurin/adb-wfx-plugin/releases/latest
+MARKER
 
 # Everything sits at the archive root, with no wrapping directory: that is
 # where Double Commander and Total Commander look for pluginst.inf when

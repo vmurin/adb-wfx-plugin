@@ -45,6 +45,11 @@ fi
 # never lets install.sh see the real HOME.
 ./tests/test_install.sh
 
+# What a release archive contains, and the two properties of it nobody notices
+# until they are already lost: pluginst.inf at the root, and the platform named
+# somewhere that survives unpacking.
+./tests/test_package.sh
+
 # tests/device_driver.cpp has its own main() and is never swept into the
 # tests/test_*.cpp glob above (see the file's own header comment).
 # Compiling it needs no device (only *running* it does -- that's
