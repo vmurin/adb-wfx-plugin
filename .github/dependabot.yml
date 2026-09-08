@@ -6,3 +6,12 @@ updates:
       interval: monthly
     commit-message:
       prefix: "ci"
+    # Every action here is pinned to a bare major tag (actions/checkout@v7), so
+    # Dependabot only ever raises major bumps and splitting the group by
+    # update-type would leave one bucket permanently empty. One group covers
+    # the whole surface: a month's bumps arrive as a single pull request that
+    # CI validates as the combination we will actually run.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
