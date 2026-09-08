@@ -7,6 +7,6 @@
 #ifndef ADB_WFX_VERSION_H
 #define ADB_WFX_VERSION_H
 
-#define ADB_WFX_VERSION "1.0.0"
+#define ADB_WFX_VERSION "1.0.1"
 
 #endif // ADB_WFX_VERSION_H

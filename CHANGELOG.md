@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.1] - 2026-09-08
 
 ### Added
 
@@ -86,5 +86,5 @@ only, permission-denied directories are indistinguishable from empty ones, and
 F6 to or from a local disk is refused by Double Commander itself before the
 plugin is asked to do anything.
 
-[Unreleased]: https://github.com/vmurin/adb-wfx-plugin/compare/v1.0.0...HEAD
+[1.0.1]: https://github.com/vmurin/adb-wfx-plugin/releases/tag/v1.0.1
 [1.0.0]: https://github.com/vmurin/adb-wfx-plugin/releases/tag/v1.0.0
