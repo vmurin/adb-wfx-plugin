@@ -5,8 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        The Linux builds pass CI but have never been run against a real Android
-        device. **Reports that it simply worked are as valuable as bug reports** —
+        The Linux builds pass CI, but real-device reports are still rare: so far
+        one for a self-built x86_64 plugin, none for the release archives or for
+        aarch64. **Reports that it simply worked are as valuable as bug reports**:
         they are what lets the README stop calling Linux untested.
 
   - type: dropdown
@@ -33,6 +34,16 @@ body:
     attributes:
       label: Architecture
       options: [x86_64, aarch64]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build
+    attributes:
+      label: Which build did you use?
+      options:
+        - Pre-built archive from Releases
+        - Built from source
     validations:
       required: true
 
