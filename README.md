@@ -32,17 +32,41 @@ inherit that.
 | Platform | Status |
 | --- | --- |
 | macOS, Apple silicon and Intel (universal binary) | Supported — hardware-confirmed on a Pixel 7 |
-| Linux x86_64 | Builds and passes the full unit suite in CI — **untested on real hardware** |
-| Linux aarch64 | Builds and passes the full unit suite in CI — **untested on real hardware** |
+| Linux x86_64 | Works on real hardware per [one user report](https://github.com/vmurin/adb-wfx-plugin/issues/6) (built from source); the release binary needs glibc 2.34+ and is **not yet confirmed** |
+| Linux aarch64 | Builds and passes the full unit suite in CI; the release binary needs glibc 2.38+ — **untested on real hardware** |
 | Windows / Total Commander | Not yet — see [Windows and Total Commander](#windows-and-total-commander) |
 
-> **The Linux builds are untested on real hardware.** They compile cleanly and
-> pass all 900+ unit checks in CI on both architectures, but nobody has yet run
-> them against an actual Android device inside Double Commander — unlike the
-> macOS build, which is verified end to end on a real phone. Nothing is known to
-> be wrong with them; they simply have not been tried. If you run one, please
-> [open an issue](https://github.com/vmurin/adb-wfx-plugin/issues) saying whether
-> it worked. Reports of success are as useful as reports of failure.
+> **Linux has one real-hardware report so far.** Both Linux builds compile
+> cleanly and pass all 900+ unit checks in CI. On x86_64, a user
+> [ran the plugin end to end](https://github.com/vmurin/adb-wfx-plugin/issues/6)
+> on Linux Mint 19.2 with Double Commander 1.3.0 (Qt5) and a Galaxy S7 on
+> Android 8, using `adb` 8.1.0 from the distribution's packages: the device
+> showed up, and browsing, download, upload and preserved modification dates
+> all worked. That plugin was built from source with GCC 9.5. The same user
+> then tried the pre-built `linux-x86_64` release archive, and it could not
+> load there at all, because Linux Mint 19.2 ships an older glibc than the
+> release binary needs (see [glibc](#glibc-and-older-distributions) below). So
+> the release archives themselves are still unconfirmed on a system new enough
+> to run them, and nothing on aarch64 has been tried. If you run one of those,
+> please
+> [file a Linux build report](https://github.com/vmurin/adb-wfx-plugin/issues/new?template=linux_report.yml)
+> saying whether it worked. Reports of success are as useful as reports of
+> failure.
+
+### glibc and older distributions
+
+The Linux release binaries are linked against the glibc of the CI image they
+are built on, and will not load on a system with an older one:
+
+| Archive | Needs glibc | For example |
+| --- | --- | --- |
+| `…-linux-x86_64.zip` | 2.34 or newer | Ubuntu 22.04, Debian 12, Linux Mint 21, RHEL 9 and later |
+| `…-linux-aarch64.zip` | 2.38 or newer | Ubuntu 24.04, Debian 13 and later |
+
+`ldd --version` shows the glibc you have. On an older distribution, build the
+plugin from source instead (see [Building](#building)): it needs nothing but a
+C++17 compiler, and a build made with GCC 9.5 on Linux Mint 19.2 is the one
+that has been confirmed to work.
 
 You will also need `adb` installed. The plugin finds it through `$ADB_PATH`,
 your `PATH`, `$ANDROID_HOME` / `$ANDROID_SDK_ROOT`, and the usual Homebrew,
@@ -126,6 +150,30 @@ Double Commander closed:
 3. Name it **`ADB`**, confirm with **OK**, then **Apply**.
 4. Quit Double Commander completely and start it again.
 
+### Portable installations
+
+In portable mode Double Commander keeps its configuration inside its own
+directory rather than in `~/.config/doublecmd/` (or
+`~/Library/Preferences/doublecmd/` on macOS). `install.sh` does not look
+there: it only checks the per-user locations and the Flatpak and Snap
+sandboxes. If none of those holds a `doublecmd.xml`, it still copies the file
+into the per-user directory and prints the manual steps, and its advice to
+start Double Commander once and re-run will not help: a portable copy never
+writes there. If one of them does hold a `doublecmd.xml`, for example from a
+regular installation on the same machine, the installer registers the plugin
+*there*, and the portable copy never sees it.
+
+So for a portable installation, register by hand:
+
+1. Copy `fsplugin.wfx64` somewhere permanent. A `plugins/wfx/adb/` folder
+   inside that Double Commander directory keeps it together with the copy that
+   uses it.
+2. Start that copy of Double Commander and follow
+   [Registering by hand](#registering-by-hand). It writes the entry into its
+   own portable configuration.
+3. If you run several portable copies, repeat this in each of them: every copy
+   has a configuration of its own.
+
 ### Checking that the registration took
 
 Double Commander records registered plugins in `doublecmd.xml`
@@ -149,8 +197,9 @@ in by hand. Edit the file only while Double Commander is closed — it rewrites
 
 | Symptom | Cause |
 | --- | --- |
-| No `ADB` entry in the VFS list | The registration did not happen — check `doublecmd.xml` as above, or [register by hand](#registering-by-hand). Double Commander running while the installer ran is the usual cause. |
+| No `ADB` entry in the VFS list | The registration did not happen — check `doublecmd.xml` as above, or [register by hand](#registering-by-hand). Double Commander running while the installer ran is the usual cause. With a portable Double Commander, the installer cannot see its configuration at all — see [Portable installations](#portable-installations). |
 | Double Commander says "This is not a valid plugin!" | The file is not a library this machine can load — nearly always the wrong release archive. All of them contain a file called `fsplugin.wfx64`, and only `adb-wfx-<version>-macos-universal.zip` holds the macOS build: `aarch64` in a Linux archive name is not Apple Silicon. Check with `file <path to fsplugin.wfx64>` — it must say `Mach-O` on macOS, `ELF` on Linux. `install.sh` refuses a foreign binary rather than installing it. |
+| Linux: the plugin does not load, and `ldd fsplugin.wfx64` reports ``version `GLIBC_2.34' not found`` (or another `GLIBC_…`) | The distribution's glibc is older than the release binary needs — see [glibc and older distributions](#glibc-and-older-distributions). Build from source instead. |
 | macOS: a system dialog says the file cannot be opened, and offers to move it to the Trash | The quarantine attribute — step 2. That dialog comes from macOS itself, not from Double Commander, and Console logs `library load disallowed by system policy` alongside it. |
 | `ADB` opens but lists no devices | The device is not visible to `adb` itself. Check `adb devices`, the USB cable, and that you accepted the authorisation prompt on the phone. |
 | "adb not found" | Set `ADB_PATH` to the full path of your `adb` binary. |
