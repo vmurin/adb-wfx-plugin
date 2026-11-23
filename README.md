@@ -31,7 +31,7 @@ inherit that.
 
 | Platform | Status |
 | --- | --- |
-| macOS, Apple silicon and Intel (universal binary) | Supported — hardware-confirmed on a Pixel 7 |
+| macOS 14 or later, Apple silicon and Intel (universal binary) | Supported — hardware-confirmed on a Pixel 7 |
 | Linux x86_64 | Works on real hardware per [one user report](https://github.com/vmurin/adb-wfx-plugin/issues/6) (built from source); the release binary needs glibc 2.34+ and is **not yet confirmed** |
 | Linux aarch64 | Builds and passes the full unit suite in CI; the release binary needs glibc 2.38+ — **untested on real hardware** |
 | Windows / Total Commander | Not yet — see [Windows and Total Commander](#windows-and-total-commander) |
@@ -219,7 +219,9 @@ CXX=g++ ./build.sh      # pick the compiler
 The result is a shared library exporting the 14 symbols Double Commander's WFX
 interface requires (`FsInitW`, `FsFindFirstW`, …, including `FsSetTimeW` — see
 [the `FsSetTimeW` gotcha](#the-fssettimew-gotcha) below) and nothing else;
-`./scripts/check-exports.sh` asserts both halves of that.
+`./scripts/check-exports.sh` asserts both halves of that. On macOS the build
+declares macOS 14.0 as its minimum regardless of the SDK it is compiled with,
+and `./scripts/check-macos-target.sh` asserts that too.
 
 `compile_mac.sh` and `compile_mac_universal.sh` still exist as thin wrappers
 around `build.sh`.
@@ -316,7 +318,8 @@ it by name, and it is one of this project's release checks.
 
 - `./run_tests.sh` — the full unit suite, which needs no device. Builds the
   plugin, compiles and runs every `tests/test_*.cpp`, and checks the
-  exported symbol table. Ends with `ALL CHECKS PASSED`. This is what CI runs
+  exported symbol table and, on macOS, the declared minimum macOS version.
+  Ends with `ALL CHECKS PASSED`. This is what CI runs
   on macOS (arm64 and x86_64) and Linux (x86_64 and aarch64).
 
 - `ADB_WFX_DEVICE_TESTS=1 ./tests/device_test.sh` — an opt-in end-to-end

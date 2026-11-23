@@ -43,6 +43,12 @@ case "$OS" in
         if [ "$UNIVERSAL" -eq 1 ]; then
             COMMON_FLAGS+=(-arch arm64 -arch x86_64)
         fi
+        # The oldest macOS the plugin promises to load on. Left unset, clang
+        # takes it from the SDK of whatever machine compiles, so moving CI to a
+        # newer runner image would silently drop support for older systems.
+        # scripts/check-macos-target.sh asserts the built binary carries it;
+        # change both together, and the README's Supported platforms table.
+        COMMON_FLAGS+=(-mmacosx-version-min=14.0)
         # Keep the Mach-O export table to the plugin's own Fs* entry points.
         # See fsplugin.exp: -fvisibility=hidden leaves weak RTTI symbols
         # exported, which is visible on x86_64 though not on arm64.

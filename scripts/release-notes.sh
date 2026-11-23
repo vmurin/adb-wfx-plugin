@@ -24,7 +24,7 @@ cat <<'NOTES'
 
 | Archive | For |
 | --- | --- |
-| `adb-wfx-*-macos-universal.zip` | macOS, Apple silicon **and** Intel |
+| `adb-wfx-*-macos-universal.zip` | macOS 14 or later, Apple silicon **and** Intel |
 | `adb-wfx-*-linux-x86_64.zip` | Linux on x86_64 |
 | `adb-wfx-*-linux-aarch64.zip` | Linux on ARM64 |
 

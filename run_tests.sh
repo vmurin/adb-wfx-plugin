@@ -40,6 +40,10 @@ fi
 
 ./scripts/check-exports.sh
 
+# macOS only (a no-op elsewhere): the binary still declares the macOS 14.0
+# floor, whichever SDK the build machine happens to have.
+./scripts/check-macos-target.sh
+
 # The installer and its doublecmd.xml registrar: pure shell and python3, no
 # device and no Double Commander involved. Sandboxed in mktemp -d, and it
 # never lets install.sh see the real HOME.
