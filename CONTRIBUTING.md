@@ -1,8 +1,9 @@
 # Contributing
 
 Thanks for taking the time. Bug reports are welcome, and **reports from Linux
-users are especially useful** — those builds pass CI but have never been run
-against a real device, so any first-hand account moves the project forward.
+users are especially useful** — those builds pass CI but have barely been run
+against a real device (one self-built x86_64 report so far), so any first-hand
+account moves the project forward.
 
 ## Building and testing
 
