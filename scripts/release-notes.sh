@@ -39,11 +39,11 @@ load:
 xattr -dr com.apple.quarantine fsplugin.wfx64
 ```
 
-**Linux builds are untested on real hardware.** They compile and pass the full
-unit suite in CI on both architectures, but nobody has yet run them against an
-actual Android device inside Double Commander — unlike the macOS build, which is
-hardware-confirmed on a Pixel 7. Reports either way are very welcome; please open
-an issue.
+**Linux:** the release binaries need glibc 2.34 or newer (x86_64) and 2.38 or
+newer (aarch64); on an older distribution, build from source. So far one user
+has confirmed a self-built x86_64 plugin on a real device; the release archives
+themselves, and aarch64, are not yet confirmed. Reports either way are very
+welcome: please file a Linux build report.
 
 **Windows / Total Commander** are not supported yet.
 NOTES
