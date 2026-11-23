@@ -5,6 +5,18 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The macOS build now states its minimum explicitly: macOS 14.0, the same floor
+  the 1.0.1 release already had. That floor used to be inherited from the CI
+  runner the release was built on, so moving off the retired `macos-14` image
+  would have silently raised it. `build.sh` passes `-mmacosx-version-min=14.0`,
+  and `scripts/check-macos-target.sh`, run by `run_tests.sh` and by the release
+  build, fails if a binary declares anything else. CI and releases now build
+  macOS on `macos-15`.
+
 ## [1.0.1] - 2026-09-08
 
 ### Added

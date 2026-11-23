@@ -31,8 +31,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The supported macOS floor is pinned in build.sh, not inherited
+          # from this runner; the build step below asserts it.
           - name: macOS universal
-            runner: macos-14
+            runner: macos-15
             suffix: macos-universal
             universal: true
           # Built on the oldest supported Ubuntu on purpose: a binary linked
@@ -57,6 +59,7 @@ jobs:
           if [ "${{ matrix.universal }}" = "true" ]; then
             ./build.sh --universal
             lipo -info fsplugin.wfx64
+            ./scripts/check-macos-target.sh
           else
             ./build.sh
           fi
